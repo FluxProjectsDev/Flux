@@ -33,7 +33,7 @@ enum WatchContext {
     WATCH_CONTEXT_GAMELIST,
     WATCH_CONTEXT_CONFIG,
     WATCH_CONTEXT_DEVICE_MITIGATION,
-    WATCH_CONTEXT_SYSTEM_STATUS,
+    WATCH_CONTEXT_SYNTHESIS_CORE,
     WATCH_CONTEXT_MODULE_UPDATE,
 };
 
@@ -69,10 +69,10 @@ void on_json_modified(const struct inotify_event *event, const std::string &path
 
         SynthesisCore status;
         if (SynthesisCoreReader::read(status, path.c_str())) {
-            system_status_cache.update(status);
+            synthesis_core_cache.update(status);
             signal_daemon_update(); // Wake up the daemon immediately
         } else {
-            LOGW_TAG("InotifyHandler", "Failed to parse system_status file: {}", path);
+            LOGW_TAG("InotifyHandler", "Failed to parse synthesis_core file: {}", path);
         }
     };
 
@@ -88,7 +88,7 @@ void on_json_modified(const struct inotify_event *event, const std::string &path
             case WATCH_CONTEXT_GAMELIST: OnGamelistModified(path); break;
             case WATCH_CONTEXT_CONFIG: OnConfigModified(path); break;
             case WATCH_CONTEXT_DEVICE_MITIGATION: OnDeviceMitigationModified(path); break;
-            case WATCH_CONTEXT_SYSTEM_STATUS: OnSynthesisCoreModified(path); break;
+            case WATCH_CONTEXT_SYNTHESIS_CORE: OnSynthesisCoreModified(path); break;
             default: break;
         }
     }
@@ -117,7 +117,7 @@ bool init_file_watcher(InotifyWatcher &watcher) {
         {
             SynthesisCore initial;
             if (SynthesisCoreReader::read(initial)) {
-                system_status_cache.update(initial);
+                synsthesis_core_cache.update(initial);
                 LOGD_TAG("InotifyHandler", "Pre-seeded SynthesisCoreCache from existing status file");
             }
         }
@@ -131,8 +131,8 @@ bool init_file_watcher(InotifyWatcher &watcher) {
             DEVICE_MITIGATION_FILE, on_json_modified, WATCH_CONTEXT_DEVICE_MITIGATION, nullptr
         };
 
-        InotifyWatcher::WatchReference system_status_ref{
-            SYSTEM_STATUS_FILE, on_json_modified, WATCH_CONTEXT_SYSTEM_STATUS, nullptr
+        InotifyWatcher::WatchReference synthesis_core_ref{
+            SYNTHESIS_CORE_FILE, on_json_modified, WATCH_CONTEXT_SYNTHESIS_CORE, nullptr
         };
 
         // Watch the module directory for creation of the "update" file.
@@ -154,8 +154,8 @@ bool init_file_watcher(InotifyWatcher &watcher) {
             return false;
         }
 
-        if (!watcher.addFile(system_status_ref)) {
-            LOGE_TAG("InotifyWatcher", "Failed to add system_status watch");
+        if (!watcher.addFile(synthesis_core_ref)) {
+            LOGE_TAG("InotifyWatcher", "Failed to add synthesis_core watch");
             return false;
         }
 

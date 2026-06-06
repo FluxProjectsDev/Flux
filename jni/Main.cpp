@@ -69,7 +69,7 @@ void notify_fatal_error(const std::string &error_msg) {
 // Global event signaling for immediate daemon wake-up
 // ---------------------------------------------------------------------------
 
-int system_status_event_fd = -1;
+int synthesis_core_event_fd = -1;
 
 std::atomic<bool> daemon_stop_requested{false};
 
@@ -77,9 +77,9 @@ std::atomic<bool> daemon_stop_requested{false};
  * @brief Signal the daemon to wake pool loop
  */
 void signal_daemon_update() {
-    if (system_status_event_fd >= 0) {
+    if (synthesis_core_event_fd >= 0) {
         uint64_t val = 1;
-        ssize_t ret = write(system_status_event_fd, &val, sizeof(val));
+        ssize_t ret = write(synthesis_core_event_fd, &val, sizeof(val));
         (void)ret; // Suppress unused warning
     }
 }
@@ -131,7 +131,7 @@ void watch_java_lock() {
 
 struct DaemonState {
     FluxProfileMode cur_mode = PERFCOMMON;
-    SynthesisCore system_status = {};
+    SynthesisCore synthesis_core = {};
 
     std::string active_package;
 
@@ -170,7 +170,7 @@ struct DaemonState {
  * by the PID tracker callback, so this function only examines focus state.
  */
 [[nodiscard]] static bool is_game_still_active(DaemonState &state) {
-    if (state.system_status.focused_app == state.active_package) {
+    if (state.synthesis_core.focused_app == state.active_package) {
         state.focus_loss_count = 0;
         return true;
     }
@@ -195,7 +195,7 @@ struct DaemonState {
  */
 [[nodiscard]] static std::optional<bool> get_battery_saver_state() {
     SynthesisCore status;
-    if (!system_status_cache.get(status)) {
+    if (!synthesis_core_cache.get(status)) {
         return std::nullopt;
     }
     return status.battery_saver;
@@ -206,7 +206,7 @@ struct DaemonState {
  */
 [[nodiscard]] static pid_t pidof_game(const std::string &package_name) {
     SynthesisCore status;
-    if (system_status_cache.get(status) && status.focused_app == package_name && status.focused_pid > 0) {
+    if (synthesis_core_cache.get(status) && status.focused_app == package_name && status.focused_pid > 0) {
         return status.focused_pid;
     }
 
@@ -224,7 +224,7 @@ struct DaemonState {
  */
 bool is_dnd_enabled() {
     SynthesisCore status;
-    if (system_status_cache.get(status)) {
+    if (synthesis_core_cache.get(status)) {
         return status.zen_mode != 0;
     }
 
@@ -234,8 +234,8 @@ bool is_dnd_enabled() {
 /**
  * @brief Pull the latest system-status snapshot from the inotify-fed cache.
  */
-[[nodiscard]] static bool refresh_system_status(DaemonState &state) {
-    if (!system_status_cache.get(state.system_status)) {
+[[nodiscard]] static bool refresh_synthesis_core(DaemonState &state) {
+    if (!synthesis_core_cache.get(state.synthesis_core)) {
         LOGW_TAG("SynthesisCore", "Cache not yet populated, waiting for SystemMonitor");
         return false;
     }
@@ -270,7 +270,7 @@ static void handle_game_exit(DaemonState &state) {
 
     // Refresh immediately so the balance/powersave decision below sees
     // the current foreground app rather than stale data.
-    if (!refresh_system_status(state)) {
+    if (!refresh_synthesis_core(state)) {
         LOGE_TAG("SynthesisCore", "Failed to refresh system status after game exit");
     }
 }
@@ -358,7 +358,7 @@ static void handle_game_exit(DaemonState &state) {
  * Each branch is a no-op when the current mode already matches.
  */
 static void select_profile(DaemonState &state) {
-    if (!state.active_package.empty() && state.system_status.screen_awake) {
+    if (!state.active_package.empty() && state.synthesis_core.screen_awake) {
         if (!state.need_profile_checkup && state.cur_mode == PERFORMANCE_PROFILE) return;
         if (apply_game_profile(state)) return;
     }
@@ -401,19 +401,19 @@ static void flux_main_daemon() {
     // The InotifyWatcher will call signal_daemon_update() as soon as the
     // watched file changes, so we can block here rather than busy-wait.
     while (!daemon_stop_requested.load(std::memory_order_relaxed)) {
-        if (refresh_system_status(state)) break;
-        struct pollfd pfd = {system_status_event_fd, POLLIN, 0};
+        if (refresh_synthesis_core(state)) break;
+        struct pollfd pfd = {synthesis_core_event_fd, POLLIN, 0};
         poll(&pfd, 1, -1); // block until InotifyWatcher signals
         uint64_t val;
-        ssize_t ret = read(system_status_event_fd, &val, sizeof(val));
+        ssize_t ret = read(synthesis_core_event_fd, &val, sizeof(val));
         (void)ret;
     }
 
-    // Single event source: system_status_event_fd
+    // Single event source: synthesis_core_event_fd
     //   - inotify updates from InotifyWatcher
     //   - pid_tracker process-death callbacks
     //   - signal_daemon_stop() wakeups (from java_lock watch or signal handler)
-    struct pollfd pfd = {system_status_event_fd, POLLIN, 0};
+    struct pollfd pfd = {synthesis_core_event_fd, POLLIN, 0};
 
     while (!daemon_stop_requested.load(std::memory_order_relaxed)) {
         const int ret = poll(&pfd, 1, -1); // sleep until something happens
@@ -429,7 +429,7 @@ static void flux_main_daemon() {
         if (pfd.revents & POLLIN) {
             // Drain all accumulated wakeups in one read.
             uint64_t val;
-            ssize_t rd = read(system_status_event_fd, &val, sizeof(val));
+            ssize_t rd = read(synthesis_core_event_fd, &val, sizeof(val));
             (void)rd;
 
             if (state.in_game_session && state.pid_tracker.get_current_pid() == 0) {
@@ -437,7 +437,7 @@ static void flux_main_daemon() {
                 // Fall through, select_profile below will apply balance/powersave.
             }
 
-            if (!refresh_system_status(state)) continue;
+            if (!refresh_synthesis_core(state)) continue;
 
             // Focus-loss check (3-strike debounce against transient blips)
             if (state.in_game_session && !state.active_package.empty()) {
@@ -457,7 +457,7 @@ static void flux_main_daemon() {
 
             // Discover a newly focused game
             if (state.active_package.empty()) {
-                state.active_package = get_active_game(state.system_status, game_registry);
+                state.active_package = get_active_game(state.synthesis_core, game_registry);
                 if (!state.active_package.empty()) {
                     state.in_game_session = true;
                     LOGD("DND state before in_game_session: {}", state.prev_dnd_state ? "ON" : "OFF");
@@ -533,10 +533,10 @@ int run_daemon() {
         return EXIT_FAILURE;
     }
 
-    // eventfd for immediate daemon wake-up on system_status changes and PID
+    // eventfd for immediate daemon wake-up on synthesis_core changes and PID
     // tracker callbacks.
-    system_status_event_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-    if (system_status_event_fd < 0) {
+    synthesis_core_event_fd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (synthesis_core_event_fd < 0) {
         LOGC("Failed to create eventfd: {}", strerror(errno));
         notify_fatal_error("Failed to create eventfd");
         return EXIT_FAILURE;
@@ -565,8 +565,8 @@ int run_daemon() {
     if (!init_file_watcher(file_watcher)) {
         LOGC("Failed to initialize file watcher");
         notify_fatal_error("Failed to initialize file watcher");
-        close(system_status_event_fd);
-        system_status_event_fd = -1;
+        close(synthesis_core_event_fd);
+        synthesis_core_event_fd = -1;
         return EXIT_FAILURE;
     }
 
@@ -576,9 +576,9 @@ int run_daemon() {
 
     LOGW("Flux Tweaks daemon exited");
 
-    if (system_status_event_fd >= 0) {
-        close(system_status_event_fd);
-        system_status_event_fd = -1;
+    if (synthesis_core_event_fd >= 0) {
+        close(synthesis_core_event_fd);
+        synthesis_core_event_fd = -1;
     }
 
     SignalHandler::cleanup_before_exit();
