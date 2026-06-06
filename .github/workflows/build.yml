@@ -1,4 +1,4 @@
-name: Build Encore Tweaks
+name: Build Flux Tweaks
 
 on:
   pull_request:
@@ -43,7 +43,7 @@ jobs:
       - name: Bun Setup
         uses: oven-sh/setup-bun@v2
 
-      - name: Build Encore Daemon
+      - name: Build Flux Daemon
         run: ndk-build -j$(nproc --all)
 
       - name: Build WebUI
@@ -60,7 +60,7 @@ jobs:
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v6
         with:
-          name: encore-build
+          name: flux-build
           path: ${{ steps.compileZip.outputs.zipName }}
 
       - name: Upload To Telegram
@@ -71,7 +71,7 @@ jobs:
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
           COMMIT_URL: ${{ github.event.head_commit.url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          TITLE: Encore Tweaks
+          TITLE: Flux Tweaks
         run: |
           export VERSION=$(git rev-list --count HEAD)
           bash .github/scripts/telegram_bot.sh ${{ steps.compileZip.outputs.zipName }}
