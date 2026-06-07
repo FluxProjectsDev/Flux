@@ -4,6 +4,6 @@ version=
 versionCode=
 author=FebriCahyaa
 description=Adaptive gaming and battery optimization framework.
-updateJson=https://encore.rem01gaming.dev/api/update.json
+updateJson=
 banner=banner.webp
 webuiIcon=webroot/icon.webp

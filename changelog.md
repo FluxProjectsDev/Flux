@@ -9,3 +9,4 @@
 - WebUI for configuration
 - Support for Magisk, KernelSU, and APatch
 - Multi-architecture support (arm64, arm, x86_64)
+- SynthesisCore Prebuilt in

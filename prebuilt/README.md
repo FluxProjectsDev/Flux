@@ -1,3 +1,3 @@
 This folder contains following prebuilt programs:
 
-[SynthesisCore](): Used for gathering system information.
+[Synthesis Core](https://github.com/FebriCahyaa/SynthesisCore): Used for gathering system information.
