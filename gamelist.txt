@@ -385,7 +385,6 @@ com.supercell.clashofclans
 com.supercell.clashroyale
 com.supercell.hayday
 com.supercell.squad
-com.supercell.moco
 com.sybogames.subway.surfers.game
 com.sy.dldlhsdj
 com.t2ksports.nba2k20and

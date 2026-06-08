@@ -16,9 +16,14 @@ export const useMonitorStore = defineStore('monitor', () => {
   const batterySaver    = ref(false)
   const zenMode         = ref(0)
   const charging        = ref(false)
-  const thermalHeadroom = ref(-1)   // -1 = unsupported
-  const audioActive     = ref(false)
-  const currentProfile  = ref('initializing')
+  const thermalHeadroom     = ref(-1)    // -1 = unsupported
+  const audioActive         = ref(false)
+  const currentProfile      = ref('initializing')
+  // Reported by SynthesisCore: 1 if getThermalHeadroom() resolved at init.
+  // Lets WebUI distinguish "API absent" from "API present but returning NaN".
+  const thermalApiAvailable = ref(false)
+  // Reported by SynthesisCore: 1 if uname -r matches the GKI "-androidXX-" pattern.
+  const kernelIsGki         = ref(false)
 
   // ── History arrays (for sparkline charts) ──────────────────────────────────
   // Each entry: { t: timestamp_ms, v: number }
@@ -32,8 +37,15 @@ export const useMonitorStore = defineStore('monitor', () => {
 
   // ── Computed helpers ────────────────────────────────────────────────────────
 
-  /** true only when getThermalHeadroom() is supported on this device */
-  const thermalSupported = computed(() => thermalHeadroom.value >= 0)
+  /**
+   * true when getThermalHeadroom() is both available (API resolved) AND
+   * returning a valid non-negative value on this device.
+   * thermalApiAvailable=false  → API absent (SDK < 31 or method missing)
+   * thermalApiAvailable=true + thermalHeadroom=-1 → API present but NaN (rare)
+   */
+  const thermalSupported = computed(() =>
+    thermalApiAvailable.value && thermalHeadroom.value >= 0
+  )
 
   /**
    * Thermal tier label derived from the same thresholds used by the C++ daemon:
@@ -107,6 +119,8 @@ export const useMonitorStore = defineStore('monitor', () => {
    *   charging_state 1
    *   thermal_status 0.82
    *   audio_active 0
+   *   thermal_api_available 1   ← new: 1 if getThermalHeadroom() resolved
+   *   kernel_is_gki 1           ← new: 1 if uname -r matches GKI pattern
    */
   function parseSynthesisCore(raw) {
     if (!raw) return
@@ -140,6 +154,12 @@ export const useMonitorStore = defineStore('monitor', () => {
         }
         case 'audio_active':
           audioActive.value = parts[1] === '1'
+          break
+        case 'thermal_api_available':
+          thermalApiAvailable.value = parts[1] === '1'
+          break
+        case 'kernel_is_gki':
+          kernelIsGki.value = parts[1] === '1'
           break
       }
     }
@@ -180,6 +200,8 @@ export const useMonitorStore = defineStore('monitor', () => {
     thermalHeadroom,
     audioActive,
     currentProfile,
+    thermalApiAvailable,
+    kernelIsGki,
     // computed
     thermalSupported,
     thermalLabel,
