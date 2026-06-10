@@ -15,6 +15,7 @@
  */
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -75,11 +76,15 @@ std::atomic<bool> daemon_stop_requested{false};
 
 /**
  * @brief Signal the daemon to wake pool loop
+ *
+ * Uses a local snapshot of synthesis_core_event_fd to avoid a TOCTOU race
+ * where another thread closes the fd between the ">= 0" check and the write().
  */
 void signal_daemon_update() {
-    if (synthesis_core_event_fd >= 0) {
+    const int fd = synthesis_core_event_fd; // atomic snapshot
+    if (fd >= 0) {
         uint64_t val = 1;
-        ssize_t ret = write(synthesis_core_event_fd, &val, sizeof(val));
+        ssize_t ret = write(fd, &val, sizeof(val));
         (void)ret; // Suppress unused warning
     }
 }
@@ -147,6 +152,10 @@ struct DaemonState {
     int focus_loss_count = 0;
 
     PIDTracker pid_tracker;
+
+    /// Timestamp of the last thermal-triggered profile switch.
+    /// Used to debounce rapid PERFORMANCE ↔ PERFORMANCE_LITE oscillation.
+    std::chrono::steady_clock::time_point last_thermal_switch_tp{};
 };
 
 // ---------------------------------------------------------------------------
@@ -311,13 +320,28 @@ static void handle_game_exit(DaemonState &state) {
     }
 }
 
+/// Minimum interval between thermal-triggered profile switches.
+/// Prevents rapid PERFORMANCE ↔ PERFORMANCE_LITE oscillation when thermal
+/// headroom hovers near the threshold, which would stall the main loop with
+/// repeated system() calls and cause CPU frequency instability.
+static constexpr auto THERMAL_SWITCH_DEBOUNCE = std::chrono::seconds(5);
+
 /**
  * @brief Apply the performance profile for the active game.
  *
- * Resolves the game entry and PID, applies the profile, and arms the PID
- * tracker.
+ * Resolves the game entry and PID, updates the PID tracker unconditionally
+ * (even when the profile mode is unchanged), then applies the profile.
  *
- * @return true if the profile was applied; false if the session was cleared.
+ * Key invariants:
+ *  - state.pid_tracker.set_pid() is ALWAYS called before any early return
+ *    that returns true, so a game restart with a new PID is always caught.
+ *  - need_profile_checkup is saved before being cleared; the saved value is
+ *    used in the early-return guards so a forced reapply actually works.
+ *  - Thermal-triggered switches are debounced by THERMAL_SWITCH_DEBOUNCE to
+ *    prevent rapid PERFORMANCE ↔ PERFORMANCE_LITE oscillation.
+ *
+ * @return true if the profile was applied or is still valid; false if the
+ *         session was cleared.
  */
 [[nodiscard]] static bool apply_game_profile(DaemonState &state) {
     auto *active_game = game_registry.find_game_ptr(state.active_package);
@@ -338,52 +362,22 @@ static void handle_game_exit(DaemonState &state) {
         return false;
     }
 
-    state.need_profile_checkup = false;
-
-    const bool config_lite = active_game->lite_mode || config_store.get_preferences().enforce_lite_mode;
-    const float thermal = get_thermal_headroom();
-    const bool thermal_lite = (thermal >= 0.0f && thermal < THERMAL_LITE_THRESHOLD);
-
-    if (config_lite) {
-        // Config-forced lite mode: always use lite, ignore thermal
-        if (state.cur_mode == PERFORMANCE_LITE_PROFILE && !state.need_profile_checkup) return true;
-        state.cur_mode = PERFORMANCE_LITE_PROFILE;
-        LOGI("Applying performance_lite profile for {} (PID: {}) [config]", state.active_package, game_pid);
-        apply_performance_lite_profile(state.active_package, game_pid);
-    } else if (thermal_lite) {
-        // Thermal pressure detected: downgrade to lite
-        if (state.cur_mode == PERFORMANCE_LITE_PROFILE) return true;
-        state.cur_mode = PERFORMANCE_LITE_PROFILE;
-        LOGW("Thermal headroom {:.2f} < {:.2f} — downgrading to performance_lite for {}",
-             thermal, THERMAL_LITE_THRESHOLD, state.active_package);
-        apply_performance_lite_profile(state.active_package, game_pid);
-    } else {
-        // Recover to full performance if headroom is healthy or unsupported
-        const bool can_upgrade = (thermal < 0.0f || thermal >= THERMAL_RECOVER_THRESHOLD);
-        if (state.cur_mode == PERFORMANCE_PROFILE && !state.need_profile_checkup) return true;
-        if (state.cur_mode == PERFORMANCE_LITE_PROFILE && !can_upgrade) return true;
-        state.cur_mode = PERFORMANCE_PROFILE;
-        LOGI("Applying performance profile for {} (PID: {})", state.active_package, game_pid);
-        apply_performance_profile(false, state.active_package, game_pid);
-    }
-
-    // For MLBB and other games by Moonton, UnityKillsMe is the foreground process.
-    // For all other games, track the main game PID.
-    const pid_t mlbb_pid = pidof(state.active_package + ":UnityKillsMe", true);
+    // Resolve tracked PID *before* any profile-mode early returns so the
+    // tracker is always refreshed even when we skip the profile reapplication.
+    // For MLBB/Moonton games the foreground process is "UnityKillsMe".
+    const pid_t mlbb_pid    = pidof(state.active_package + ":UnityKillsMe", true);
     const pid_t tracked_pid = (mlbb_pid != 0) ? mlbb_pid : game_pid;
 
     if (mlbb_pid != 0) {
-        LOGD("Found UnityKillsMe thread for {} (PID: {}), tracking as game process", state.active_package, mlbb_pid);
+        LOGD("Found UnityKillsMe thread for {} (PID: {}), tracking as game process",
+             state.active_package, mlbb_pid);
     }
 
     if (kill(tracked_pid, 0) != 0) {
         LOGW(
             "Game {} (PID: {}) exited while applying profile ({}), aborting session",
-            state.active_package,
-            tracked_pid,
-            strerror(errno)
+            state.active_package, tracked_pid, strerror(errno)
         );
-
         state.active_package.clear();
         state.pid_tracker.invalidate();
         state.in_game_session = false;
@@ -391,7 +385,70 @@ static void handle_game_exit(DaemonState &state) {
         return false;
     }
 
+    // Always keep the tracker current — even when we return early below.
+    // Without this, a game restart (new PID) would leave the tracker watching
+    // a dead PID, silently missing the eventual process-death callback.
     state.pid_tracker.set_pid(tracked_pid);
+
+    // Save and clear the checkup flag.  The saved value is used in the
+    // early-return guards so "force reapply" actually reapplies the profile.
+    const bool force_reapply = state.need_profile_checkup;
+    state.need_profile_checkup = false;
+
+    const bool config_lite = active_game->lite_mode || config_store.get_preferences().enforce_lite_mode;
+    const float thermal     = get_thermal_headroom();
+    const bool thermal_lite = (thermal >= 0.0f && thermal < THERMAL_LITE_THRESHOLD);
+
+    if (config_lite) {
+        // Config-forced lite mode: always lite, ignore thermal.
+        if (state.cur_mode == PERFORMANCE_LITE_PROFILE && !force_reapply) return true;
+        state.cur_mode = PERFORMANCE_LITE_PROFILE;
+        LOGI("Applying performance_lite profile for {} (PID: {}) [config]",
+             state.active_package, game_pid);
+        apply_performance_lite_profile(state.active_package, game_pid);
+
+    } else if (thermal_lite) {
+        // Thermal pressure: debounce before downgrading to avoid oscillation.
+        if (state.cur_mode == PERFORMANCE_LITE_PROFILE && !force_reapply) return true;
+
+        const auto now     = std::chrono::steady_clock::now();
+        const auto elapsed = now - state.last_thermal_switch_tp;
+        if (state.cur_mode == PERFORMANCE_PROFILE && elapsed < THERMAL_SWITCH_DEBOUNCE) {
+            LOGD("Thermal headroom {:.2f} < threshold but debounce active ({:.1f}s remaining), holding profile",
+                 thermal,
+                 std::chrono::duration<double>(THERMAL_SWITCH_DEBOUNCE - elapsed).count());
+            return true;
+        }
+
+        state.cur_mode              = PERFORMANCE_LITE_PROFILE;
+        state.last_thermal_switch_tp = now;
+        LOGW("Thermal headroom {:.2f} < {:.2f} — downgrading to performance_lite for {}",
+             thermal, THERMAL_LITE_THRESHOLD, state.active_package);
+        apply_performance_lite_profile(state.active_package, game_pid);
+
+    } else {
+        // Healthy headroom or thermal API unsupported — recover to full performance.
+        const bool can_upgrade = (thermal < 0.0f || thermal >= THERMAL_RECOVER_THRESHOLD);
+        if (state.cur_mode == PERFORMANCE_PROFILE && !force_reapply) return true;
+        if (state.cur_mode == PERFORMANCE_LITE_PROFILE && !can_upgrade) return true;
+
+        if (state.cur_mode == PERFORMANCE_LITE_PROFILE && can_upgrade) {
+            // Debounce the upgrade as well to avoid oscillation.
+            const auto now     = std::chrono::steady_clock::now();
+            const auto elapsed = now - state.last_thermal_switch_tp;
+            if (!force_reapply && elapsed < THERMAL_SWITCH_DEBOUNCE) {
+                LOGD("Thermal recovered to {:.2f} but debounce active ({:.1f}s remaining), holding lite profile",
+                     thermal,
+                     std::chrono::duration<double>(THERMAL_SWITCH_DEBOUNCE - elapsed).count());
+                return true;
+            }
+            state.last_thermal_switch_tp = now;
+        }
+
+        state.cur_mode = PERFORMANCE_PROFILE;
+        LOGI("Applying performance profile for {} (PID: {})", state.active_package, game_pid);
+        apply_performance_profile(false, state.active_package, game_pid);
+    }
 
     // DND handling
     if (active_game->enable_dnd) {

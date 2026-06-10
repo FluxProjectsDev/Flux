@@ -65,6 +65,22 @@ void set_profiler_env_vars() {
     FluxConfigStore::CPUGovernor cpu_governor_preference = config_store.get_cpu_governor();
     setenv("FLUX_BALANCED_CPUGOV", cpu_governor_preference.balance.c_str(), 1);
     setenv("FLUX_POWERSAVE_CPUGOV", cpu_governor_preference.powersave.c_str(), 1);
+
+    // Expose kernel and thermal API capabilities so the profiler shell script
+    // can skip sysfs writes that are only valid on GKI kernels or API 31+.
+    // Writing to unsupported sysfs nodes on certain vendor kernels can cause
+    // hard hangs or kernel oops, leading to device freeze or reboot.
+    {
+        SynthesisCore status;
+        if (synthesis_core_cache.get(status)) {
+            setenv("FLUX_IS_GKI_KERNEL",        status.kernel_is_gki        ? "1" : "0", 1);
+            setenv("FLUX_THERMAL_API_AVAILABLE", status.thermal_api_available ? "1" : "0", 1);
+        } else {
+            // Cache not yet populated — default to the safest / most-compatible values.
+            setenv("FLUX_IS_GKI_KERNEL",        "0", 1);
+            setenv("FLUX_THERMAL_API_AVAILABLE", "0", 1);
+        }
+    }
 }
 
 void run_perfcommon(void) {

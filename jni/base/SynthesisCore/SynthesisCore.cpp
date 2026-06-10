@@ -84,6 +84,18 @@ bool read(SynthesisCore &out, const char *path) {
             parsed_any = true;
             continue;
         }
+
+        if (sscanf(line, "thermal_api_available %d", &ival) == 1) {
+            out.thermal_api_available = (ival != 0);
+            parsed_any = true;
+            continue;
+        }
+
+        if (sscanf(line, "kernel_is_gki %d", &ival) == 1) {
+            out.kernel_is_gki = (ival != 0);
+            parsed_any = true;
+            continue;
+        }
     }
 
     fclose(fp);

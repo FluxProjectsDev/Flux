@@ -32,6 +32,8 @@ struct SynthesisCore {
     bool charging = false;
     float thermal_headroom = -1.0f; // -1.0 = unsupported (API < 31)
     bool audio_active = false;
+    bool thermal_api_available = false; ///< true when getThermalHeadroom() resolved on API 31+
+    bool kernel_is_gki = false;         ///< true when kernel reports GKI (-androidXX- in uname -r)
 };
 
 namespace SynthesisCoreReader {

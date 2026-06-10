@@ -126,17 +126,19 @@ bool PIDTracker::tracking_loop_pidfd(int pidfd) {
     int ret = poll(pfds, 2, -1);
 
     if (ret > 0) {
-        // Interrupted
-        if (pfds[1].revents & POLLIN) {
+        const bool process_exited = (pfds[0].revents & POLLIN) != 0;
+        const bool interrupted    = (pfds[1].revents & POLLIN) != 0;
+
+        // Always drain the wakeup fd to prevent stale events on the next iteration.
+        if (interrupted) {
             uint64_t val;
-            read(wakeup_fd, &val, sizeof(val));
-            return false;
+            (void)read(wakeup_fd, &val, sizeof(val));
         }
 
-        // Process exited
-        if (pfds[0].revents & POLLIN) {
-            return true;
-        }
+        // Process exit takes PRIORITY over a simultaneous wakeup.
+        // Both events can fire together when set_pid/invalidate races with
+        // the process dying — we must not silently swallow the death event.
+        return process_exited;
     }
 
     return false;
