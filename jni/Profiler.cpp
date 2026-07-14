@@ -71,13 +71,13 @@ void set_profiler_env_vars() {
     // Writing to unsupported sysfs nodes on certain vendor kernels can cause
     // hard hangs or kernel oops, leading to device freeze or reboot.
     {
-        SynthesisCore status;
-        if (synthesis_core_cache.get(status)) {
-            setenv("FLUX_IS_GKI_KERNEL",        status.kernel_is_gki        ? "1" : "0", 1);
-            setenv("FLUX_THERMAL_API_AVAILABLE", status.thermal_api_available ? "1" : "0", 1);
+        const auto status = synthesis_core_cache.get();
+        if (status.has_value()) {
+            setenv("FLUX_IS_GKI_KERNEL", status->kernel_is_gki ? "1" : "0", 1);
+            setenv("FLUX_THERMAL_API_AVAILABLE", status->thermal_available ? "1" : "0", 1);
         } else {
-            // Cache not yet populated — default to the safest / most-compatible values.
-            setenv("FLUX_IS_GKI_KERNEL",        "0", 1);
+            // No telemetry yet — default to the safest / most-compatible values.
+            setenv("FLUX_IS_GKI_KERNEL", "0", 1);
             setenv("FLUX_THERMAL_API_AVAILABLE", "0", 1);
         }
     }
@@ -105,9 +105,9 @@ void apply_performance_profile(bool lite_mode, std::string game_pkg, pid_t game_
     set_profiler_env_vars();
 
     uid_t game_uid = 0;
-    SynthesisCore status;
-    if (synthesis_core_cache.get(status) && status.focused_app == game_pkg && status.focused_uid > 0) {
-        game_uid = status.focused_uid;
+    const auto status = synthesis_core_cache.get();
+    if (status.has_value() && status->focused_package == game_pkg && status->focused_uid > 0) {
+        game_uid = status->focused_uid;
     } else {
         game_uid = get_uid_by_package_name(game_pkg);
     }
@@ -138,9 +138,9 @@ void apply_performance_lite_profile(std::string game_pkg, pid_t game_pid) {
     set_profiler_env_vars();
 
     uid_t game_uid = 0;
-    SynthesisCore status;
-    if (synthesis_core_cache.get(status) && status.focused_app == game_pkg && status.focused_uid > 0) {
-        game_uid = status.focused_uid;
+    const auto status = synthesis_core_cache.get();
+    if (status.has_value() && status->focused_package == game_pkg && status->focused_uid > 0) {
+        game_uid = status->focused_uid;
     } else {
         game_uid = get_uid_by_package_name(game_pkg);
     }

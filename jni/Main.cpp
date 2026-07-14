@@ -30,6 +30,8 @@
 #include "InotifyHandler.hpp"
 #include "Profiler.hpp"
 
+#include <ProfilePolicy.hpp>
+
 #include <Flux.hpp>
 #include <FluxLog.hpp>
 #include <FluxUtility.hpp>
@@ -114,18 +116,37 @@ static LockFile java_lock{JAVA_LOCK_FILE};
     return daemon_lock.acquire(LockFile::AcquireMode::NonBlocking, LockFile::LockType::Exclusive);
 }
 
+/// Set when SynthesisCore's lock goes away, i.e. the telemetry producer died.
+/// Read by the main loop; cleared when a fresh snapshot proves it is back.
+std::atomic<bool> synthesiscore_down{false};
+
+/// How many times we have observed SynthesisCore disappear. Exposed to diagnostics.
+std::atomic<uint64_t> synthesiscore_restart_count{0};
+
 /**
- * @brief Arm the Java companion daemon liveness watch
+ * @brief Arm the SynthesisCore liveness watch.
  *
- * Installs a LockFile::watch() on JAVA_LOCK_FILE. The watch callback fires
- * signal_daemon_stop() the instant the Java daemon releases its lock.
+ * Installs a LockFile::watch() on JAVA_LOCK_FILE, which SynthesisCore holds for as long as
+ * it is alive.
+ *
+ * **This no longer stops the daemon.** It used to call signal_daemon_stop(), so a crash in
+ * the telemetry producer terminated the entire policy engine — a sensor failure took down
+ * the thing that reacts to sensors, and the device was left running whatever profile
+ * happened to be applied at that moment, with nothing left to change it.
+ *
+ * Flux now records the outage, falls back to a safe profile through the normal policy path
+ * (telemetry health becomes Offline), and keeps running. The service supervisor restarts
+ * SynthesisCore; when a healthy v2 snapshot appears, the policy resumes on its own.
  */
 void watch_java_lock() {
     java_lock.watch([](bool became_free) {
         if (became_free) {
-            LOGC("Java daemon lock released, companion daemon exited or crashed, stopping daemon");
-            notify_fatal_error("Java companion daemon crashed");
-            signal_daemon_stop();
+            synthesiscore_down.store(true, std::memory_order_relaxed);
+            synthesiscore_restart_count.fetch_add(1, std::memory_order_relaxed);
+            LOGW("SynthesisCore lock released: telemetry producer exited. "
+                 "Falling back to a safe profile and awaiting its restart.");
+            set_module_description_status("\xE2\x9A\xA0 Telemetry unavailable, running safe profile");
+            signal_daemon_update(); // re-evaluate the policy now, do not wait for a tick
         }
     });
 }
@@ -135,40 +156,50 @@ void watch_java_lock() {
 // ---------------------------------------------------------------------------
 
 struct DaemonState {
-    FluxProfileMode cur_mode = PERFCOMMON;
-    SynthesisCore synthesis_core = {};
+    /// All profile-selection logic lives in ProfilePolicy, which is pure and host-tested.
+    /// This struct holds only what the daemon needs to *drive* it and to act on its output.
+    ProfilePolicy policy{};
+    PolicyState policy_state{};
+    FreshnessPolicy freshness{};
+    TransitionHistory history{64};
 
     std::string active_package;
-
     bool in_game_session = false;
-    bool battery_saver_state = false;
-    bool charging_state = false;
-    bool audio_active = false;
-    bool need_profile_checkup = false;
-    bool game_requested_dnd = false;
-    bool prev_dnd_state = false;
-    bool dnd_just_cleared = false;
-
     int focus_loss_count = 0;
 
-    PIDTracker pid_tracker;
+    /// True when we asked for DND on the game's behalf and have not yet put it back.
+    bool game_requested_dnd = false;
 
-    /// Timestamp of the last thermal-triggered profile switch.
-    /// Used to debounce rapid PERFORMANCE ↔ PERFORMANCE_LITE oscillation.
-    std::chrono::steady_clock::time_point last_thermal_switch_tp{};
+    /// The user's zen mode before we touched it. A full enum, not a boolean: restoring
+    /// "total silence" or "alarms only" as "priority" silently changes the user's setting.
+    int prev_zen_mode = ZEN_MODE_OFF;
+
+    /// Set for one cycle after we restore zen, so we do not immediately re-read our own
+    /// write back into prev_zen_mode.
+    bool zen_just_restored = false;
+
+    PIDTracker pid_tracker;
 };
+
+/// How often the daemon re-evaluates even when nothing has happened.
+///
+/// The loop is event-driven, but a dead producer generates no events — so a purely
+/// event-driven loop would block in poll() forever and never notice that its telemetry had
+/// gone stale. This tick is what makes the staleness and offline transitions actually fire.
+static constexpr int DAEMON_TICK_MS = 1000;
 
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
 
+
 /**
- * @brief Returns the package name of the focused registered game,
- *        or an empty string if none is active.
+ * @brief Returns the package name of the focused registered game, or empty if none.
  */
-[[nodiscard]] static std::string get_active_game(const SynthesisCore &status, GameRegistry &registry) {
-    if (registry.is_game_registered(status.focused_app)) {
-        return status.focused_app;
+[[nodiscard]] static std::string get_active_game(const TelemetrySnapshot &snap, GameRegistry &registry) {
+    if (!snap.foreground_available) return {};
+    if (registry.is_game_registered(snap.focused_package)) {
+        return snap.focused_package;
     }
     return {};
 }
@@ -176,341 +207,245 @@ struct DaemonState {
 /**
  * @brief Returns true if the active game still holds focus.
  *
- * Uses a 3-strike debounce so transient focus blips (e.g. in-game overlays)
- * are not mistaken for a genuine exit. Process-death is handled exclusively
- * by the PID tracker callback, so this function only examines focus state.
+ * Uses a 3-strike debounce so transient focus blips (in-game overlays, permission dialogs)
+ * are not mistaken for a genuine exit. Process death is handled by the PID tracker callback,
+ * so this only examines focus.
  */
-[[nodiscard]] static bool is_game_still_active(DaemonState &state) {
-    if (state.synthesis_core.focused_app == state.active_package) {
+[[nodiscard]] static bool is_game_still_active(DaemonState &state, const TelemetrySnapshot &snap) {
+    if (snap.focused_package == state.active_package) {
         state.focus_loss_count = 0;
         return true;
     }
 
-    // Only return false if the focus lost persists for 3 consecutive status updates
     state.focus_loss_count++;
     if (state.focus_loss_count < 3) {
-        LOGD("is_game_still_active: Focus lost for {}, strike {}/3", state.active_package, state.focus_loss_count);
+        LOGD("Focus lost for {}, strike {}/3", state.active_package, state.focus_loss_count);
         return true;
     }
 
-    LOGD("is_game_still_active: Game {} no longer active (3 strikes reached)", state.active_package);
+    LOGD("Game {} no longer focused (3 strikes)", state.active_package);
     state.focus_loss_count = 0;
     return false;
 }
 
 /**
- * @brief Queries the current battery-saver state.
- *
- * Reads the battery_saver field from the inotify-fed SynthesisCoreCache.
- * Returns std::nullopt when both methods fail.
- */
-[[nodiscard]] static std::optional<bool> get_battery_saver_state() {
-    SynthesisCore status;
-    if (!synthesis_core_cache.get(status)) {
-        return std::nullopt;
-    }
-    return status.battery_saver;
-}
-
-/**
- * @brief Queries the current charging state from the inotify-fed cache.
- */
-[[nodiscard]] static std::optional<bool> get_charging_state() {
-    SynthesisCore status;
-    if (!synthesis_core_cache.get(status)) {
-        return std::nullopt;
-    }
-    return status.charging;
-}
-
-/**
- * @brief Queries whether audio is currently active from the inotify-fed cache.
- */
-[[nodiscard]] static std::optional<bool> get_audio_active() {
-    SynthesisCore status;
-    if (!synthesis_core_cache.get(status)) {
-        return std::nullopt;
-    }
-    return status.audio_active;
-}
-
-/**
- * @brief Returns the latest thermal headroom from the inotify-fed cache.
- * @return -1.0 when cache is not yet populated or device doesn't support the API.
- */
-[[nodiscard]] static float get_thermal_headroom() {
-    SynthesisCore status;
-    if (!synthesis_core_cache.get(status)) {
-        return -1.0f;
-    }
-    return status.thermal_headroom;
-}
-
-/**
  * @brief Returns the PID of @p package_name, or 0 on failure.
  */
-[[nodiscard]] static pid_t pidof_game(const std::string &package_name) {
-    SynthesisCore status;
-    if (synthesis_core_cache.get(status) && status.focused_app == package_name && status.focused_pid > 0) {
-        return status.focused_pid;
+[[nodiscard]] static pid_t pidof_game(const std::string &package_name, const std::optional<TelemetrySnapshot> &snap) {
+    if (snap && snap->focused_package == package_name && snap->focused_pid > 0) {
+        return snap->focused_pid;
     }
 
-    // Fallback to scan /proc for the process name
     const pid_t pid = pidof(package_name, false);
     if (pid != 0) return pid;
+
     LOGE_TAG("pidof_game", "Could not find PID for {}", package_name);
     return 0;
 }
 
 /**
- * @brief Checks if Do Not Disturb mode is currently enabled.
- * @return true if zen_mode is 1 (Priority), 2 (Total Silence), or 3 (Alarms Only).
- * @return false if zen_mode is 0 or if the java daemon fails to fetch zen_mode.
+ * @brief Put the user's zen mode back exactly as we found it.
+ *
+ * Restores the full enum. Previously this called set_do_not_disturb(prev_dnd_state), where
+ * prev_dnd_state was a bool — so a user who had been in "total silence" or "alarms only"
+ * came back to "priority", a setting they never chose.
  */
-bool is_dnd_enabled() {
-    SynthesisCore status;
-    if (synthesis_core_cache.get(status)) {
-        return status.zen_mode != 0;
+static void restore_zen_if_needed(DaemonState &state) {
+    if (!state.game_requested_dnd) return;
+
+    LOGI("Restoring zen mode to {}", zen_mode_to_dnd_arg(state.prev_zen_mode));
+    set_zen_mode(state.prev_zen_mode);
+    state.game_requested_dnd = false;
+    state.zen_just_restored  = true;
+}
+
+/**
+ * @brief Handle the tracked game process exiting.
+ */
+static void handle_game_exit(DaemonState &state) {
+    LOGI("Game {} exited", state.active_package);
+    restore_zen_if_needed(state);
+    state.active_package.clear();
+    state.pid_tracker.invalidate();
+    state.in_game_session  = false;
+    state.focus_loss_count = 0;
+}
+
+/**
+ * @brief Apply @p mode to the system.
+ *
+ * @return true when the profile was applied. A profile is never reported as active unless
+ *         the apply step actually ran; the caller records the outcome in the transition
+ *         history either way.
+ */
+[[nodiscard]] static bool apply_profile(
+    FluxProfileMode mode, const std::string &package, pid_t pid, std::string &error_out
+) {
+    try {
+        switch (mode) {
+            case PERFORMANCE_PROFILE:
+                if (pid == 0) {
+                    error_out = "no PID for " + package;
+                    return false;
+                }
+                apply_performance_profile(false, package, pid);
+                return true;
+
+            case PERFORMANCE_LITE_PROFILE:
+                if (pid == 0) {
+                    error_out = "no PID for " + package;
+                    return false;
+                }
+                apply_performance_lite_profile(package, pid);
+                return true;
+
+            case BALANCE_PROFILE: apply_balance_profile(); return true;
+            case POWERSAVE_PROFILE: apply_powersave_profile(); return true;
+            case PERFCOMMON: run_perfcommon(); return true;
+        }
+    } catch (const std::exception &e) {
+        error_out = e.what();
+        return false;
     }
 
+    error_out = "unknown profile mode";
     return false;
 }
 
 /**
- * @brief Pull the latest system-status snapshot from the inotify-fed cache.
- */
-[[nodiscard]] static bool refresh_synthesis_core(DaemonState &state) {
-    if (!synthesis_core_cache.get(state.synthesis_core)) {
-        LOGW_TAG("SynthesisCore", "Cache not yet populated, waiting for SystemMonitor");
-        return false;
-    }
-
-    return true;
-}
-
-/**
- * @brief Clear Do Not Disturb if the game had requested it.
- */
-static void clear_dnd_if_needed(DaemonState &state) {
-    if (state.game_requested_dnd) {
-        set_do_not_disturb(state.prev_dnd_state);
-        state.game_requested_dnd = false;
-        state.dnd_just_cleared = true;
-    }
-}
-
-/**
- * @brief Handle the transition when the tracked game process exits.
+ * @brief Run one policy evaluation and act on the result.
  *
- * Clears session state and does an immediate system-status refresh so the
- * next profile decision is based on fresh data.
+ * The decision itself is made by ProfilePolicy, which is pure and covered by host tests.
+ * Everything here is the side effects: applying the profile, driving zen, and recording what
+ * happened and why.
  */
-static void handle_game_exit(DaemonState &state) {
-    LOGI("Game {} exited", state.active_package);
-    clear_dnd_if_needed(state);
-    state.active_package.clear();
-    state.pid_tracker.invalidate();
-    state.in_game_session = false;
-    state.need_profile_checkup = true;
+static void evaluate_and_apply(DaemonState &state, int64_t now_ms) {
+    const auto snapshot = synthesis_core_cache.get();
+    const auto health   = synthesis_core_cache.health(now_ms, state.freshness);
 
-    // Refresh immediately so the balance/powersave decision below sees
-    // the current foreground app rather than stale data.
-    if (!refresh_synthesis_core(state)) {
-        LOGE_TAG("SynthesisCore", "Failed to refresh system status after game exit");
-    }
-}
-
-/// Minimum interval between thermal-triggered profile switches.
-/// Prevents rapid PERFORMANCE ↔ PERFORMANCE_LITE oscillation when thermal
-/// headroom hovers near the threshold, which would stall the main loop with
-/// repeated system() calls and cause CPU frequency instability.
-static constexpr auto THERMAL_SWITCH_DEBOUNCE = std::chrono::seconds(5);
-
-/**
- * @brief Apply the performance profile for the active game.
- *
- * Resolves the game entry and PID, updates the PID tracker unconditionally
- * (even when the profile mode is unchanged), then applies the profile.
- *
- * Key invariants:
- *  - state.pid_tracker.set_pid() is ALWAYS called before any early return
- *    that returns true, so a game restart with a new PID is always caught.
- *  - need_profile_checkup is saved before being cleared; the saved value is
- *    used in the early-return guards so a forced reapply actually works.
- *  - Thermal-triggered switches are debounced by THERMAL_SWITCH_DEBOUNCE to
- *    prevent rapid PERFORMANCE ↔ PERFORMANCE_LITE oscillation.
- *
- * @return true if the profile was applied or is still valid; false if the
- *         session was cleared.
- */
-[[nodiscard]] static bool apply_game_profile(DaemonState &state) {
-    auto *active_game = game_registry.find_game_ptr(state.active_package);
-    if (!active_game) {
-        LOGI("Game {} is no longer listed in registry", state.active_package);
-        state.active_package.clear();
-        state.pid_tracker.invalidate();
-        state.in_game_session = false;
-        return false;
+    // A healthy snapshot proves SynthesisCore came back.
+    if (health == TelemetryHealth::Healthy && synthesiscore_down.exchange(false, std::memory_order_relaxed)) {
+        LOGI("SynthesisCore telemetry restored (sequence {})", snapshot ? snapshot->sequence : 0);
+        set_module_description_status("\xF0\x9F\x98\x8B Tweaks applied successfully");
     }
 
-    const pid_t game_pid = pidof_game(state.active_package);
-    if (game_pid == 0) {
-        LOGE("Unable to fetch PID of {}", state.active_package);
-        state.active_package.clear();
-        state.pid_tracker.invalidate();
-        state.in_game_session = false;
-        return false;
-    }
-
-    // Resolve tracked PID *before* any profile-mode early returns so the
-    // tracker is always refreshed even when we skip the profile reapplication.
-    // For MLBB/Moonton games the foreground process is "UnityKillsMe".
-    const pid_t mlbb_pid    = pidof(state.active_package + ":UnityKillsMe", true);
-    const pid_t tracked_pid = (mlbb_pid != 0) ? mlbb_pid : game_pid;
-
-    if (mlbb_pid != 0) {
-        LOGD("Found UnityKillsMe thread for {} (PID: {}), tracking as game process",
-             state.active_package, mlbb_pid);
-    }
-
-    if (kill(tracked_pid, 0) != 0) {
-        LOGW(
-            "Game {} (PID: {}) exited while applying profile ({}), aborting session",
-            state.active_package, tracked_pid, strerror(errno)
-        );
-        state.active_package.clear();
-        state.pid_tracker.invalidate();
-        state.in_game_session = false;
-        state.need_profile_checkup = true;
-        return false;
-    }
-
-    // Always keep the tracker current — even when we return early below.
-    // Without this, a game restart (new PID) would leave the tracker watching
-    // a dead PID, silently missing the eventual process-death callback.
-    state.pid_tracker.set_pid(tracked_pid);
-
-    // Save and clear the checkup flag.  The saved value is used in the
-    // early-return guards so "force reapply" actually reapplies the profile.
-    const bool force_reapply = state.need_profile_checkup;
-    state.need_profile_checkup = false;
-
-    const bool config_lite = active_game->lite_mode || config_store.get_preferences().enforce_lite_mode;
-    const float thermal     = get_thermal_headroom();
-    const bool thermal_lite = (thermal >= 0.0f && thermal < THERMAL_LITE_THRESHOLD);
-
-    if (config_lite) {
-        // Config-forced lite mode: always lite, ignore thermal.
-        if (state.cur_mode == PERFORMANCE_LITE_PROFILE && !force_reapply) return true;
-        state.cur_mode = PERFORMANCE_LITE_PROFILE;
-        LOGI("Applying performance_lite profile for {} (PID: {}) [config]",
-             state.active_package, game_pid);
-        apply_performance_lite_profile(state.active_package, game_pid);
-
-    } else if (thermal_lite) {
-        // Thermal pressure: debounce before downgrading to avoid oscillation.
-        if (state.cur_mode == PERFORMANCE_LITE_PROFILE && !force_reapply) return true;
-
-        const auto now     = std::chrono::steady_clock::now();
-        const auto elapsed = now - state.last_thermal_switch_tp;
-        if (state.cur_mode == PERFORMANCE_PROFILE && elapsed < THERMAL_SWITCH_DEBOUNCE) {
-            LOGD("Thermal headroom {:.2f} < threshold but debounce active ({:.1f}s remaining), holding profile",
-                 thermal,
-                 std::chrono::duration<double>(THERMAL_SWITCH_DEBOUNCE - elapsed).count());
-            return true;
-        }
-
-        state.cur_mode              = PERFORMANCE_LITE_PROFILE;
-        state.last_thermal_switch_tp = now;
-        LOGW("Thermal headroom {:.2f} < {:.2f} — downgrading to performance_lite for {}",
-             thermal, THERMAL_LITE_THRESHOLD, state.active_package);
-        apply_performance_lite_profile(state.active_package, game_pid);
-
-    } else {
-        // Healthy headroom or thermal API unsupported — recover to full performance.
-        const bool can_upgrade = (thermal < 0.0f || thermal >= THERMAL_RECOVER_THRESHOLD);
-        if (state.cur_mode == PERFORMANCE_PROFILE && !force_reapply) return true;
-        if (state.cur_mode == PERFORMANCE_LITE_PROFILE && !can_upgrade) return true;
-
-        if (state.cur_mode == PERFORMANCE_LITE_PROFILE && can_upgrade) {
-            // Debounce the upgrade as well to avoid oscillation.
-            const auto now     = std::chrono::steady_clock::now();
-            const auto elapsed = now - state.last_thermal_switch_tp;
-            if (!force_reapply && elapsed < THERMAL_SWITCH_DEBOUNCE) {
-                LOGD("Thermal recovered to {:.2f} but debounce active ({:.1f}s remaining), holding lite profile",
-                     thermal,
-                     std::chrono::duration<double>(THERMAL_SWITCH_DEBOUNCE - elapsed).count());
-                return true;
+    // --- Game session bookkeeping ------------------------------------------
+    // Only trust a healthy snapshot to *start* a session. A stale one may name a game that
+    // exited minutes ago.
+    if (snapshot && health == TelemetryHealth::Healthy) {
+        if (state.in_game_session && !state.active_package.empty()) {
+            if (!is_game_still_active(state, *snapshot)) [[unlikely]] {
+                handle_game_exit(state);
             }
-            state.last_thermal_switch_tp = now;
         }
 
-        state.cur_mode = PERFORMANCE_PROFILE;
-        LOGI("Applying performance profile for {} (PID: {})", state.active_package, game_pid);
-        apply_performance_profile(false, state.active_package, game_pid);
+        // Track the user's own zen preference while we are not overriding it.
+        if (!state.game_requested_dnd && snapshot->zen_available) {
+            if (state.zen_just_restored) {
+                state.zen_just_restored = false; // do not read our own write back
+            } else {
+                state.prev_zen_mode = snapshot->zen_mode;
+            }
+        }
+
+        if (state.active_package.empty()) {
+            state.active_package = get_active_game(*snapshot, game_registry);
+            if (!state.active_package.empty()) {
+                state.in_game_session = true;
+                LOGI("Game session started: {} (zen before: {})", state.active_package,
+                     zen_mode_to_dnd_arg(state.prev_zen_mode));
+            }
+        }
     }
 
-    // DND handling
-    if (active_game->enable_dnd) {
-        state.game_requested_dnd = true;
-        set_do_not_disturb(true);
+    // A game whose process died is not a game session, regardless of telemetry health.
+    if (state.in_game_session && state.pid_tracker.get_current_pid() == 0) {
+        handle_game_exit(state);
+    }
+
+    // --- Decide -------------------------------------------------------------
+    const auto *game_entry =
+        state.active_package.empty() ? nullptr : game_registry.find_game_ptr(state.active_package);
+
+    // A game that vanished from the registry (user removed it in the WebUI) ends the session.
+    if (state.in_game_session && !state.active_package.empty() && !game_entry) {
+        LOGI("Game {} no longer in registry, ending session", state.active_package);
+        handle_game_exit(state);
+    }
+
+    PolicyInputs inputs;
+    inputs.health          = health;
+    inputs.snapshot        = snapshot;
+    inputs.in_game_session = state.in_game_session;
+    inputs.active_package  = state.active_package;
+    inputs.game_forces_lite =
+        game_entry ? (game_entry->lite_mode || config_store.get_preferences().enforce_lite_mode) : false;
+    inputs.shutdown_requested = daemon_stop_requested.load(std::memory_order_relaxed);
+
+    const FluxProfileMode previous = state.policy_state.current;
+    const PolicyDecision decision  = state.policy.evaluate(inputs, state.policy_state, now_ms);
+
+    // --- Act ----------------------------------------------------------------
+    const bool in_perf_tier =
+        (decision.profile == PERFORMANCE_PROFILE || decision.profile == PERFORMANCE_LITE_PROFILE);
+
+    pid_t game_pid = 0;
+    if (in_perf_tier && !state.active_package.empty()) {
+        game_pid = pidof_game(state.active_package, snapshot);
+
+        // For Moonton/MLBB titles the process that actually renders is a child thread group.
+        const pid_t mlbb_pid = pidof(state.active_package + ":UnityKillsMe", true);
+        const pid_t tracked  = (mlbb_pid != 0) ? mlbb_pid : game_pid;
+        if (tracked != 0) state.pid_tracker.set_pid(tracked);
+
+        if (game_pid == 0) {
+            LOGW("Cannot resolve PID for {}, ending session", state.active_package);
+            handle_game_exit(state);
+            return; // re-evaluated on the next tick with the session cleared
+        }
+    }
+
+    if (!decision.changed) return;
+
+    std::string apply_error;
+    const bool applied = apply_profile(decision.profile, state.active_package, game_pid, apply_error);
+
+    if (!applied) {
+        // Do not claim a profile is active when applying it failed. Roll the recorded state
+        // back so the next evaluation retries rather than believing the job is done.
+        LOGE("Failed to apply {} profile: {}", profile_mode_string(decision.profile), apply_error);
+        state.policy_state.current = previous;
     } else {
-        state.game_requested_dnd = false;
-        set_do_not_disturb(state.prev_dnd_state);
+        LOGI("Profile {} -> {} ({})", profile_mode_string(previous),
+             profile_mode_string(decision.profile), transition_reason_string(decision.reason));
     }
 
-    return true;
-}
-
-/**
- * @brief Select and apply the appropriate profile based on current state.
- *
- * Priority order:
- *   1. Active game + screen awake  → performance or performance_lite (thermal-aware)
- *   2. Battery saver active        → powersave profile
- *   3. Charging + no game          → balance profile (allow full clock recovery)
- *   4. Otherwise                   → balance profile
- *
- * Thermal-aware tiering (within game session):
- *   - thermal_headroom < THERMAL_LITE_THRESHOLD  → performance_lite
- *   - thermal_headroom >= THERMAL_RECOVER_THRESHOLD (or unsupported) → performance
- *   - Hysteresis gap between the two thresholds prevents rapid oscillation.
- *
- * Audio guard: profile switches are suppressed while audio_active=1 to avoid
- * disrupting in-game audio during brief focus blips.
- *
- * Each branch is a no-op when the current mode already matches.
- */
-static void select_profile(DaemonState &state) {
-    // Audio guard: skip profile change if audio is playing and we're already
-    // in a performance tier — avoids micro-stutters from mid-session switches.
-    const bool in_perf_tier = (state.cur_mode == PERFORMANCE_PROFILE ||
-                                state.cur_mode == PERFORMANCE_LITE_PROFILE);
-    if (state.audio_active && in_perf_tier && !state.need_profile_checkup) {
-        LOGD("Audio active — suppressing profile switch");
-        return;
+    // --- Zen ----------------------------------------------------------------
+    if (applied) {
+        const bool wants_dnd = in_perf_tier && game_entry && game_entry->enable_dnd;
+        if (wants_dnd && !state.game_requested_dnd) {
+            state.game_requested_dnd = true;
+            set_do_not_disturb(true);
+        } else if (!in_perf_tier) {
+            restore_zen_if_needed(state);
+        }
     }
 
-    if (!state.active_package.empty() && state.synthesis_core.screen_awake) {
-        if (apply_game_profile(state)) return;
+    // --- Record -------------------------------------------------------------
+    TransitionRecord record;
+    record.from         = previous;
+    record.to           = applied ? decision.profile : previous;
+    record.reason       = decision.reason;
+    record.monotonic_ms = now_ms;
+    record.package      = state.active_package;
+    record.health       = health;
+    record.applied      = applied;
+    record.apply_error  = apply_error;
+    if (snapshot && snapshot->has_thermal()) {
+        record.thermal_headroom = snapshot->thermal_headroom;
+        record.thermal_valid    = true;
     }
-
-    if (state.battery_saver_state) {
-        if (state.cur_mode == POWERSAVE_PROFILE) return;
-        state.cur_mode = POWERSAVE_PROFILE;
-        state.need_profile_checkup = false;
-        LOGI("Applying powersave profile");
-        apply_powersave_profile();
-        clear_dnd_if_needed(state);
-        return;
-    }
-
-    if (state.cur_mode == BALANCE_PROFILE) return;
-    state.cur_mode = BALANCE_PROFILE;
-    state.need_profile_checkup = false;
-    LOGI("Applying balance profile{}", state.charging_state ? " (charging)" : "");
-    apply_balance_profile();
-    clear_dnd_if_needed(state);
+    state.history.record(record);
 }
 
 // ---------------------------------------------------------------------------
@@ -523,32 +458,25 @@ static void flux_main_daemon() {
 
     run_perfcommon();
 
-    // On any tracked process death, immediately wake the
-    // main poll so handle_game_exit runs without delay.
-    state.pid_tracker.set_callback([](pid_t) {
-        signal_daemon_update();
-    });
+    // Wake the loop the moment a tracked process dies.
+    state.pid_tracker.set_callback([](pid_t) { signal_daemon_update(); });
 
-    // Spin until the inotify-fed cache has its first snapshot.
-    // The InotifyWatcher will call signal_daemon_update() as soon as the
-    // watched file changes, so we can block here rather than busy-wait.
-    while (!daemon_stop_requested.load(std::memory_order_relaxed)) {
-        if (refresh_synthesis_core(state)) break;
-        struct pollfd pfd = {synthesis_core_event_fd, POLLIN, 0};
-        poll(&pfd, 1, -1); // block until InotifyWatcher signals
-        uint64_t val;
-        ssize_t ret = read(synthesis_core_event_fd, &val, sizeof(val));
-        (void)ret;
-    }
-
-    // Single event source: synthesis_core_event_fd
-    //   - inotify updates from InotifyWatcher
-    //   - pid_tracker process-death callbacks
-    //   - signal_daemon_stop() wakeups (from java_lock watch or signal handler)
+    // The loop is woken by:
+    //   - inotify telemetry updates (via signal_daemon_update)
+    //   - PID tracker process-death callbacks
+    //   - signal_daemon_stop()
+    //   - and, crucially, a periodic timeout.
+    //
+    // The timeout is what makes telemetry staleness detectable at all. If SynthesisCore dies,
+    // it stops writing, so no further inotify events arrive — a purely event-driven loop
+    // would block in poll() indefinitely and never notice. The old loop used poll(..., -1)
+    // and had exactly that hole; it only avoided sleeping forever because the death of the
+    // Java lock killed the whole daemon.
     struct pollfd pfd = {synthesis_core_event_fd, POLLIN, 0};
 
     while (!daemon_stop_requested.load(std::memory_order_relaxed)) {
-        const int ret = poll(&pfd, 1, -1); // sleep until something happens
+        const int ret = poll(&pfd, 1, DAEMON_TICK_MS);
+
         if (ret < 0) {
             if (errno == EINTR) continue;
             LOGE_TAG("MainThread", "poll() failed: {}", strerror(errno));
@@ -558,70 +486,20 @@ static void flux_main_daemon() {
         if (daemon_stop_requested.load(std::memory_order_relaxed)) [[unlikely]]
             break;
 
-        if (pfd.revents & POLLIN) {
-            // Drain all accumulated wakeups in one read.
-            uint64_t val;
-            ssize_t rd = read(synthesis_core_event_fd, &val, sizeof(val));
+        if (ret > 0 && (pfd.revents & POLLIN)) {
+            // Drain all coalesced wakeups in one read.
+            uint64_t val = 0;
+            const ssize_t rd = read(synthesis_core_event_fd, &val, sizeof(val));
             (void)rd;
-
-            if (state.in_game_session && state.pid_tracker.get_current_pid() == 0) {
-                handle_game_exit(state);
-                // Fall through, select_profile below will apply balance/powersave.
-            }
-
-            if (!refresh_synthesis_core(state)) continue;
-
-            // Focus-loss check (3-strike debounce against transient blips)
-            if (state.in_game_session && !state.active_package.empty()) {
-                if (!is_game_still_active(state)) [[unlikely]] {
-                    handle_game_exit(state);
-                }
-            }
-
-            // Track user's DND preference while we are not overriding it
-            if (!state.game_requested_dnd) {
-                if (state.dnd_just_cleared) {
-                    state.dnd_just_cleared = false;
-                } else {
-                    state.prev_dnd_state = is_dnd_enabled();
-                }
-            }
-
-            // Discover a newly focused game
-            if (state.active_package.empty()) {
-                state.active_package = get_active_game(state.synthesis_core, game_registry);
-                if (!state.active_package.empty()) {
-                    state.in_game_session = true;
-                    LOGD("DND state before in_game_session: {}", state.prev_dnd_state ? "ON" : "OFF");
-                }
-            }
-
-            if (state.active_package.empty()) {
-                const auto bs_state = get_battery_saver_state();
-                if (bs_state.has_value()) {
-                    state.battery_saver_state = *bs_state;
-                } else {
-                    LOGW("get_battery_saver_state: cache not yet populated, retaining last known value");
-                }
-            }
-
-            // Refresh charging and audio state unconditionally — used by
-            // select_profile regardless of whether a game is active.
-            {
-                const auto charging = get_charging_state();
-                if (charging.has_value()) {
-                    state.charging_state = *charging;
-                }
-
-                const auto audio = get_audio_active();
-                if (audio.has_value()) {
-                    state.audio_active = *audio;
-                }
-            }
-
-            select_profile(state);
         }
+
+        // Runs on every wakeup *and* on every timeout — the timeout path is what drives the
+        // Healthy -> Stale -> Offline transitions when the producer has gone quiet.
+        evaluate_and_apply(state, flux_monotonic_ms());
     }
+
+    // Leave the user's zen mode as we found it, whatever happens.
+    restore_zen_if_needed(state);
 }
 
 // ---------------------------------------------------------------------------
@@ -688,23 +566,34 @@ int run_daemon() {
         return EXIT_FAILURE;
     }
 
-    // Check for the Java companion daemon lock before proceeding
+    // Give SynthesisCore a grace period to come up, but do not make Flux's existence
+    // conditional on it.
+    //
+    // This used to exit the daemon outright if the producer had not appeared within 120 s.
+    // Combined with the watch below (which also used to exit on producer death), Flux could
+    // not run at all without SynthesisCore — a telemetry outage meant no policy engine, and
+    // therefore no thermal protection, rather than a degraded one. Flux now starts, applies a
+    // safe profile, and picks telemetry up whenever it arrives.
     {
-        int check = 0;
-        const int max_retries = 120;
-        while (!java_lock.is_locked()) {
-            if (++check > max_retries) {
-                LOGC("Java companion daemon absent after {} checks, exiting", max_retries);
-                notify_fatal_error("Java companion daemon crashed");
-                return EXIT_FAILURE;
-            }
-
-            if (check <= 1) LOGW("Java companion daemon lock not held, waiting...");
+        int waited = 0;
+        constexpr int GRACE_SECONDS = 30;
+        while (!java_lock.is_locked() && waited < GRACE_SECONDS) {
+            if (waited == 0) LOGI("Waiting for SynthesisCore to start...");
             sleep(1);
+            ++waited;
+        }
+
+        if (!java_lock.is_locked()) {
+            synthesiscore_down.store(true, std::memory_order_relaxed);
+            LOGW("SynthesisCore did not start within {}s. Continuing in safe mode; "
+                 "telemetry will be picked up if it appears later.", GRACE_SECONDS);
+            set_module_description_status("\xE2\x9A\xA0 Telemetry unavailable, running safe profile");
+        } else {
+            LOGI("SynthesisCore is up");
         }
     }
 
-    // Watch the Java companion daemon lock
+    // Watch SynthesisCore's liveness. Its death degrades Flux; it does not stop it.
     watch_java_lock();
 
     InotifyWatcher file_watcher;
