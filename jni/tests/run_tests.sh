@@ -55,6 +55,7 @@ CXXFLAGS=(
     -I"${JNI_DIR}/base/LockFile"
     -I"${JNI_DIR}/engine/decision"
     -I"${JNI_DIR}/engine/telemetry"
+    -I"${JNI_DIR}/engine/execution"
 )
 
 LDFLAGS=(-pthread)
@@ -73,6 +74,7 @@ SOURCES=(
     "${SCRIPT_DIR}/DecisionEngineTest.cpp"
     "${SCRIPT_DIR}/DecisionParityTest.cpp"
     "${SCRIPT_DIR}/TelemetryPipelineTest.cpp"
+    "${SCRIPT_DIR}/ExecutionEngineTest.cpp"
     # Production sources, compiled as-is. Not copies.
     "${JNI_DIR}/base/SynthesisCore/SynthesisCore.cpp"
     "${JNI_DIR}/base/ProfilePolicy/ProfilePolicy.cpp"
@@ -83,6 +85,7 @@ SOURCES=(
     "${JNI_DIR}/engine/telemetry/TelemetryDecoder.cpp"
     "${JNI_DIR}/engine/telemetry/TelemetryFreshness.cpp"
     "${JNI_DIR}/engine/telemetry/RuntimeSnapshotAssembler.cpp"
+    "${JNI_DIR}/engine/execution/ExecutionEngine.cpp"
 )
 
 mkdir -p "${BUILD_DIR}"
