@@ -34,7 +34,7 @@
 #include "InotifyHandler.hpp"
 #include "Profiler.hpp"
 
-#include <ProfilePolicy.hpp>
+#include <DecisionAdapter.hpp> // Flux V2 Decision Engine (pulls in ProfilePolicy.hpp types)
 
 #include <Flux.hpp>
 #include <FluxLog.hpp>
@@ -160,9 +160,11 @@ void watch_java_lock() {
 // ---------------------------------------------------------------------------
 
 struct DaemonState {
-    /// All profile-selection logic lives in ProfilePolicy, which is pure and host-tested.
-    /// This struct holds only what the daemon needs to *drive* it and to act on its output.
-    ProfilePolicy policy{};
+    /// All profile-selection logic lives in the Flux V2 Decision Engine (pure, host-tested),
+    /// reached through FluxDecisionService. This struct holds only what the daemon needs to
+    /// *drive* it and to act on its output. The legacy ProfilePolicy is no longer on the
+    /// runtime decision path.
+    FluxDecisionService decision_service{};
     PolicyState policy_state{};
     FreshnessPolicy freshness{};
     TransitionHistory history{64};
@@ -319,9 +321,9 @@ static void handle_game_exit(DaemonState &state) {
 /**
  * @brief Run one policy evaluation and act on the result.
  *
- * The decision itself is made by ProfilePolicy, which is pure and covered by host tests.
- * Everything here is the side effects: applying the profile, driving zen, and recording what
- * happened and why.
+ * The decision itself is made by the Flux V2 Decision Engine (via FluxDecisionService), which
+ * is pure and covered by host tests. Everything here is the side effects: applying the profile,
+ * driving zen, and recording what happened and why.
  */
 static void evaluate_and_apply(DaemonState &state, int64_t now_ms) {
     const auto snapshot = synthesis_core_cache.get();
@@ -387,7 +389,7 @@ static void evaluate_and_apply(DaemonState &state, int64_t now_ms) {
     inputs.shutdown_requested = daemon_stop_requested.load(std::memory_order_relaxed);
 
     const FluxProfileMode previous = state.policy_state.current;
-    const PolicyDecision decision  = state.policy.evaluate(inputs, state.policy_state, now_ms);
+    const PolicyDecision decision  = state.decision_service.decide(inputs, state.policy_state, now_ms);
 
     // --- Act ----------------------------------------------------------------
     const bool in_perf_tier =

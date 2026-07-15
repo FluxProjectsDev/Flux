@@ -77,7 +77,14 @@ of the release pipeline.
 
 ## 4. Flux-owned original work
 
-SynthesisCore (the telemetry provider consumed by Flux), the SynthesisCore
-integration layer, the daemon host-side tests, and the SynthesisCore dependency
-tooling are original Flux work and are not derived from Encore Tweaks. See the
-provenance matrix for the authoritative per-component classification.
+The following are original Flux work and are not derived from Encore Tweaks:
+
+  - the Flux V2 Decision Engine (`jni/engine/decision/`), including its
+    compatibility adapter;
+  - the OFD-lock process-lock implementation (`jni/base/LockFile/`);
+  - SynthesisCore (the telemetry provider consumed by Flux) and the SynthesisCore
+    integration layer (`jni/base/SynthesisCore/`);
+  - the daemon host-side tests (`jni/tests/`) and the SynthesisCore dependency
+    tooling (`scripts/*synthesiscore*`).
+
+See the provenance matrix for the authoritative per-component classification.

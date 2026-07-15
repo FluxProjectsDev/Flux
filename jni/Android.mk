@@ -5,7 +5,7 @@ LOCAL_MODULE := fluxd
 
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/include
 
-LOCAL_STATIC_LIBRARIES := rapidjson spdlog ProfilePolicy SynthesisCore PIDTracker InotifyWatcher LockFile GameRegistry FluxUtility DeviceInfo
+LOCAL_STATIC_LIBRARIES := rapidjson spdlog FluxDecisionEngine ProfilePolicy SynthesisCore PIDTracker InotifyWatcher LockFile GameRegistry FluxUtility DeviceInfo
 
 LOCAL_SRC_FILES := $(wildcard $(LOCAL_PATH)/*.cpp)
 LOCAL_SRC_FILES := $(LOCAL_SRC_FILES:$(LOCAL_PATH)/%=%)
@@ -17,4 +17,4 @@ LOCAL_LDFLAGS += -flto
 
 include $(BUILD_EXECUTABLE)
 
-include $(LOCAL_PATH)/external/Android.mk $(LOCAL_PATH)/base/Android.mk
+include $(LOCAL_PATH)/external/Android.mk $(LOCAL_PATH)/base/Android.mk $(LOCAL_PATH)/engine/Android.mk
