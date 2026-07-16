@@ -36,7 +36,11 @@ and remains under Apache-2.0 while that derived material is present:
   - the profiler and utility shell scripts under `scripts/`;
   - the Magisk/KernelSU/APatch module scripts under `module/`;
   - the WebUI application under `webui/src/`;
-  - the game-detection data in `gamelist.txt`.
+  - the game-detection data in `gamelist.txt`;
+  - the per-SoC device tuning knowledge expressed as declarative capability
+    descriptors in `jni/device/` (re-expressed as data and gated behind runtime
+    capability probing; the execution mechanism that consumes them is
+    Flux-authored — see `jni/engine/execution/`, below).
 
 Files adapted from Encore Tweaks carry both the original copyright notice and a
 notice that they have been modified by the Flux project. These attributions will

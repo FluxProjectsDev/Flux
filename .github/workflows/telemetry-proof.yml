@@ -74,6 +74,12 @@ jobs:
       - name: Prove SynthesisCore schema-v2 compatibility
         run: bash .github/scripts/verify-schema-provenance.sh
 
+      # The Category A / Category C boundary is a licensing position, not a style rule: if the
+      # device tables ever grow control flow, the engine's independence claim goes with them.
+      # Checked before the build, because it needs no build to be true.
+      - name: Prove the Category A / Category C boundary
+        run: bash .github/scripts/verify-provenance-boundary.sh
+
       - name: Build Flux Daemon
         run: ndk-build -j"$(nproc --all)"
 
