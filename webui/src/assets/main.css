@@ -1,5 +1,4 @@
 @import './base.css';
-@import './fonts.css';
 @import './copy_guard.css';
 
 .main-content {
@@ -16,7 +15,9 @@ html::-webkit-scrollbar {
 }
 
 body {
-  font-family: 'Poppins', 'Google Sans Flex', system-ui, sans-serif;
+  /* System-first stack: renders in the platform UI font (Roboto / device default
+     on Android) with no bundled, redistribution-restricted font files. */
+  font-family: system-ui, 'Roboto', 'Noto Sans', -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;

@@ -7,68 +7,138 @@ const configPath = '/data/adb/.config/flux'
 // How many data points to keep in history (each tick = 1s → 60 points = 1 min)
 const HISTORY_MAX = 60
 
+// Must match SYNTHESIS_SCHEMA_VERSION in Flux.hpp / TelemetryContract.SCHEMA_VERSION.
+const SUPPORTED_SCHEMA_VERSION = 2
+
+// Freshness thresholds, mirrored from the C++ FreshnessPolicy so the UI's notion of
+// "stale" agrees with the daemon's. The producer republishes at least every 2 s, so a gap
+// past these means real trouble, not a slow tick.
+const STALE_AFTER_MS = 5000
+const OFFLINE_AFTER_MS = 15000
+
+// Android PowerManager thermal status enum, as emitted in `thermal_status`.
+const THERMAL_STATUS = {
+  '-1': 'unknown',
+  0: 'none',
+  1: 'light',
+  2: 'moderate',
+  3: 'severe',
+  4: 'critical',
+  5: 'emergency',
+  6: 'shutdown',
+}
+
 export const useMonitorStore = defineStore('monitor', () => {
-  // ── Raw live state ──────────────────────────────────────────────────────────
-  const focusedApp      = ref('—')
-  const focusedPid      = ref(0)
-  const focusedUid      = ref(0)
-  const screenAwake     = ref(false)
-  const batterySaver    = ref(false)
-  const zenMode         = ref(0)
-  const charging        = ref(false)
-  const thermalHeadroom     = ref(-1)    // -1 = unsupported
-  const audioActive         = ref(false)
-  const currentProfile      = ref('initializing')
-  const thermalApiAvailable = ref(false)
-  const kernelIsGki         = ref(false)
+  // ── Raw live state (schema v2) ──────────────────────────────────────────────
+  const schemaVersion = ref(0)
+  const sequence = ref(0)
+  const daemonPid = ref(0)
+
+  const foregroundAvailable = ref(false)
+  const focusedPackage = ref('—')
+  const focusedPid = ref(0)
+  const focusedUid = ref(0)
+
+  const screenAvailable = ref(false)
+  const screenAwake = ref(false)
+
+  const powerAvailable = ref(false)
+  const batterySaver = ref(false)
+
+  const chargingAvailable = ref(false)
+  const charging = ref(false)
+
+  // Thermal — real Android semantics: headroom is HIGHER when HOTTER.
+  // 0.0 = no thermal pressure, 1.0 = severe-throttling threshold, >1.0 = past it.
+  const thermalAvailable = ref(false)
+  const thermalValid = ref(false)
+  const thermalHeadroom = ref(NaN)
+  const thermalStatus = ref(-1)
+  const thermalAgeMs = ref(0)
+
+  const audioAvailable = ref(false)
+  const audioActive = ref(false)
+
+  const zenAvailable = ref(false)
+  const zenMode = ref(0)
+
+  const kernelIsGki = ref(false)
+  const currentProfile = ref('initializing')
 
   // ── History arrays (for sparkline charts) ──────────────────────────────────
-  // Each entry: { t: timestamp_ms, v: number }
-  const thermalHistory  = ref([])   // 0.0–1.0, -1 when unsupported
-  const profileHistory  = ref([])   // 0–4 (FluxProfileMode int)
+  // Each entry: { t, v } where v is null for a missing/invalid sample, so the chart can
+  // render an honest gap rather than drawing a fabricated 0.
+  const thermalHistory = ref([])
+  const profileHistory = ref([])
 
   // ── Internal ────────────────────────────────────────────────────────────────
   let pollInterval = null
   const isInitialized = ref(false)
   const lastError = ref('')
+  const parseError = ref('')
+  // Wall-clock time (ms) at which we last accepted a well-formed snapshot. The freshness
+  // check runs against this — the producer's own clock cannot report that the producer died.
+  const lastAcceptedAt = ref(0)
 
-  // ── Computed helpers ────────────────────────────────────────────────────────
+  // ── Health ──────────────────────────────────────────────────────────────────
 
   /**
-   * true when getThermalHeadroom() is both available (API resolved) AND
-   * returning a valid non-negative value on this device.
-   * thermalApiAvailable=false  → API absent (SDK < 31 or method missing)
-   * thermalApiAvailable=true + thermalHeadroom=-1 → API present but NaN (rare)
+   * Telemetry health, mirroring the daemon's TelemetryHealth. Drives every "is this real?"
+   * decision in the UI: a stale or offline stream must never be shown as live data.
    */
-  const thermalSupported = computed(() =>
-    thermalApiAvailable.value && thermalHeadroom.value >= 0
+  const health = computed(() => {
+    if (lastAcceptedAt.value === 0) return 'offline'
+    const age = Date.now() - lastAcceptedAt.value
+    if (age >= OFFLINE_AFTER_MS) return 'offline'
+    if (age >= STALE_AFTER_MS) return 'stale'
+    return 'healthy'
+  })
+
+  const isLive = computed(() => health.value === 'healthy')
+
+  // ── Thermal computed ─────────────────────────────────────────────────────────
+
+  const thermalSupported = computed(() => thermalAvailable.value)
+
+  /** True only when there is a usable reading to show right now. */
+  const thermalReadable = computed(
+    () => thermalAvailable.value && thermalValid.value && !Number.isNaN(thermalHeadroom.value),
   )
 
   /**
-   * Thermal tier label derived from the same thresholds used by the C++ daemon:
-   *   < 0.20  → Hot
-   *   0.20–0.35 → Warm
-   *   >= 0.35 → Cool
+   * Thermal tier from the daemon's thresholds — with the CORRECT direction. Headroom is
+   * higher when hotter, so a high value is "hot", not "cool". The previous UI had this
+   * inverted, matching the inverted daemon logic.
    */
   const thermalLabel = computed(() => {
-    if (!thermalSupported.value) return 'unsupported'
+    if (!thermalAvailable.value) return 'unsupported'
+    if (!thermalReadable.value) return 'unknown'
     const h = thermalHeadroom.value
-    if (h < 0.20) return 'hot'
-    if (h < 0.35) return 'warm'
+    if (h >= 0.85) return 'hot'
+    if (h >= 0.7) return 'warm'
     return 'cool'
   })
 
-  const thermalPercent = computed(() =>
-    thermalSupported.value ? Math.round(thermalHeadroom.value * 100) : null
+  const thermalStatusLabel = computed(
+    () => THERMAL_STATUS[String(thermalStatus.value)] ?? 'unknown',
+  )
+
+  /**
+   * Headroom as a 0–100% "thermal pressure" figure for a bar/gauge. Clamped only for
+   * display; the raw headroom above 1.0 is preserved in thermalHeadroom for anyone who
+   * needs the true value.
+   */
+  const thermalPressurePercent = computed(() =>
+    thermalReadable.value ? Math.min(100, Math.round(thermalHeadroom.value * 100)) : null,
   )
 
   // ── Profile map (mirrors Flux.hpp FluxProfileMode) ──────────────────────────
   const profileMap = {
-    '0': 'initializing',
-    '1': 'performance',
-    '2': 'performance_lite',
-    '3': 'balanced',
-    '4': 'powersave',
+    0: 'initializing',
+    1: 'performance',
+    2: 'performance_lite',
+    3: 'balanced',
+    4: 'powersave',
   }
 
   // ── Actions ─────────────────────────────────────────────────────────────────
@@ -108,58 +178,73 @@ export const useMonitorStore = defineStore('monitor', () => {
   }
 
   /**
-   * Parse the line-oriented synthesis_core.json format:
-   *   focused_app <pkg> <pid> <uid>
-   *   screen_awake 1
-   *   battery_saver 0
-   *   zen_mode 0
-   *   charging_state 1
-   *   thermal_status 0.82
-   *   audio_active 0
-   *   thermal_api_available 1
-   *   kernel_is_gki 1
+   * Parse the schema-v2 line-oriented telemetry snapshot into a staging object, and only
+   * commit it once the schema version checks out. A snapshot from an incompatible producer
+   * must not be half-applied over the live values.
    */
   function parseSynthesisCore(raw) {
     if (!raw) return
+
+    const fields = {}
     for (const line of raw.split('\n')) {
-      const parts = line.trim().split(/\s+/)
-      if (parts.length < 2) continue
-      const key = parts[0]
-      switch (key) {
-        case 'focused_app':
-          focusedApp.value = parts[1] ?? '—'
-          focusedPid.value = parseInt(parts[2]) || 0
-          focusedUid.value = parseInt(parts[3]) || 0
-          break
-        case 'screen_awake':
-          screenAwake.value = parts[1] === '1'
-          break
-        case 'battery_saver':
-          batterySaver.value = parts[1] === '1'
-          break
-        case 'zen_mode':
-          zenMode.value = parseInt(parts[1]) || 0
-          break
-        case 'charging_state':
-          charging.value = parts[1] === '1'
-          break
-        case 'thermal_status': {
-          const v = parseFloat(parts[1])
-          // parseFloat("NaN") returns NaN — treat as unsupported (-1)
-          thermalHeadroom.value = (isNaN(v) || v < 0) ? -1 : v
-          break
-        }
-        case 'audio_active':
-          audioActive.value = parts[1] === '1'
-          break
-        case 'thermal_api_available':
-          thermalApiAvailable.value = parts[1] === '1'
-          break
-        case 'kernel_is_gki':
-          kernelIsGki.value = parts[1] === '1'
-          break
-      }
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      const idx = trimmed.indexOf(' ')
+      if (idx <= 0) continue
+      fields[trimmed.slice(0, idx)] = trimmed.slice(idx + 1)
     }
+
+    const version = parseInt(fields['schema_version'], 10)
+    if (Number.isNaN(version)) {
+      parseError.value = 'missing schema_version'
+      return
+    }
+    if (version !== SUPPORTED_SCHEMA_VERSION) {
+      parseError.value = `unsupported schema ${version} (this UI speaks ${SUPPORTED_SCHEMA_VERSION})`
+      return
+    }
+
+    const bool = (key) => fields[key] === '1'
+    const int = (key) => parseInt(fields[key], 10) || 0
+    const float = (key) => {
+      const v = parseFloat(fields[key])
+      return Number.isNaN(v) ? NaN : v
+    }
+
+    schemaVersion.value = version
+    sequence.value = int('sequence')
+    daemonPid.value = int('daemon_pid')
+
+    foregroundAvailable.value = bool('foreground_available')
+    focusedPackage.value = fields['focused_package'] || '—'
+    focusedPid.value = int('focused_pid')
+    focusedUid.value = int('focused_uid')
+
+    screenAvailable.value = bool('screen_available')
+    screenAwake.value = bool('screen_awake')
+
+    powerAvailable.value = bool('power_available')
+    batterySaver.value = bool('battery_saver')
+
+    chargingAvailable.value = bool('charging_available')
+    charging.value = bool('charging_state')
+
+    thermalAvailable.value = bool('thermal_available')
+    thermalValid.value = bool('thermal_valid')
+    thermalHeadroom.value = float('thermal_headroom')
+    thermalStatus.value = int('thermal_status')
+    thermalAgeMs.value = int('thermal_age_ms')
+
+    audioAvailable.value = bool('audio_available')
+    audioActive.value = bool('audio_active')
+
+    zenAvailable.value = bool('zen_available')
+    zenMode.value = int('zen_mode')
+
+    kernelIsGki.value = bool('kernel_is_gki')
+
+    parseError.value = ''
+    lastAcceptedAt.value = Date.now()
   }
 
   async function readCurrentProfile() {
@@ -175,11 +260,13 @@ export const useMonitorStore = defineStore('monitor', () => {
   function recordHistory() {
     const now = Date.now()
 
-    thermalHistory.value.push({ t: now, v: thermalHeadroom.value })
+    // null when there is no usable reading, so the chart shows a gap instead of a fake 0.
+    thermalHistory.value.push({ t: now, v: thermalReadable.value ? thermalHeadroom.value : null })
     if (thermalHistory.value.length > HISTORY_MAX) thermalHistory.value.shift()
 
     const profileInt = parseInt(
-      Object.keys(profileMap).find(k => profileMap[k] === currentProfile.value) ?? '0'
+      Object.keys(profileMap).find((k) => profileMap[k] === currentProfile.value) ?? '0',
+      10,
     )
     profileHistory.value.push({ t: now, v: profileInt })
     if (profileHistory.value.length > HISTORY_MAX) profileHistory.value.shift()
@@ -187,28 +274,51 @@ export const useMonitorStore = defineStore('monitor', () => {
 
   return {
     // live state
-    focusedApp,
+    schemaVersion,
+    sequence,
+    daemonPid,
+    foregroundAvailable,
+    focusedPackage,
+    // Back-compat alias: existing views bind `focusedApp`.
+    focusedApp: focusedPackage,
     focusedPid,
     focusedUid,
+    screenAvailable,
     screenAwake,
+    powerAvailable,
     batterySaver,
-    zenMode,
+    chargingAvailable,
     charging,
+    thermalAvailable,
+    thermalValid,
     thermalHeadroom,
+    thermalStatus,
+    thermalAgeMs,
+    audioAvailable,
     audioActive,
-    currentProfile,
-    thermalApiAvailable,
+    zenAvailable,
+    zenMode,
     kernelIsGki,
+    currentProfile,
     // computed
+    health,
+    isLive,
     thermalSupported,
+    thermalReadable,
     thermalLabel,
-    thermalPercent,
+    thermalStatusLabel,
+    thermalPressurePercent,
+    // Back-compat alias for existing views. Note the corrected meaning: this is headroom
+    // toward the severe threshold, so a HIGH number now means HOT (it meant cool before).
+    thermalPercent: thermalPressurePercent,
     // history
     thermalHistory,
     profileHistory,
     // meta
     isInitialized,
     lastError,
+    parseError,
+    lastAcceptedAt,
     // actions
     init,
     stopPolling,

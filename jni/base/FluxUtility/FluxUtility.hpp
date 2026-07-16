@@ -1,5 +1,9 @@
 /*
+ * Copyright (C) 2024-2026 Rem01Gaming
  * Copyright (C) 2024-2026 FebriCahyaa
+ *
+ * Adapted from Encore Tweaks (https://github.com/Rem01Gaming/encore).
+ * Modified by the Flux project.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -49,7 +53,37 @@
 void notify(const char *message);
 
 /**
- * @brief Sets the do not disturb mode via shell.
+ * @brief Android's Settings.Global.ZEN_MODE_* values.
+ *
+ * SynthesisCore reports this as an integer, and it must stay one all the way through. There
+ * are four distinct modes and only the first is "off" — flattening the other three into a
+ * single boolean loses which one the user had chosen.
+ */
+enum ZenMode : int {
+    ZEN_MODE_OFF                    = 0,
+    ZEN_MODE_IMPORTANT_INTERRUPTIONS = 1, ///< "Priority only"
+    ZEN_MODE_NO_INTERRUPTIONS       = 2,  ///< "Total silence"
+    ZEN_MODE_ALARMS                 = 3,  ///< "Alarms only"
+};
+
+/** Translate a zen mode to the argument `cmd notification set_dnd` expects. */
+const char *zen_mode_to_dnd_arg(int zen_mode);
+
+/**
+ * @brief Restore an exact zen mode via shell.
+ *
+ * Use this — not set_do_not_disturb() — whenever restoring a mode that came from telemetry.
+ * A user in "total silence" or "alarms only" must get that mode back, not "priority".
+ *
+ * @note It is only intended for use in an Android environment.
+ */
+void set_zen_mode(int zen_mode);
+
+/**
+ * @brief Turn DND on (as "priority only") or off.
+ *
+ * Suitable for a game *requesting* DND. Not suitable for restoring a previous state; see
+ * set_zen_mode().
  *
  * @param do_not_disturb True to enable DND mode, false to disable.
  * @note It is only intended for use in an Android environment.

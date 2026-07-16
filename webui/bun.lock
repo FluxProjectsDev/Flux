@@ -3,7 +3,7 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "encore_spa",
+      "name": "flux_spa",
       "dependencies": {
         "@tailwindcss/vite": "^4.3.0",
         "eruda": "^3.4.3",

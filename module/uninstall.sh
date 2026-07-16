@@ -1,5 +1,9 @@
 #
 # Copyright (C) 2024-2026 Rem01Gaming
+# Copyright (C) 2024-2026 FebriCahyaa
+#
+# Adapted from Encore Tweaks (https://github.com/Rem01Gaming/encore).
+# Modified by the Flux project.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +18,10 @@
 # limitations under the License.
 #
 
-rm -rf /data/adb/.config/encore
-rm -f /data/adb/service.d/.encore_cleanup.sh
+rm -rf /data/adb/.config/flux
+rm -f /data/adb/service.d/.flux_cleanup.sh
 
-need_gone="encored encore_profiler encore_utility encore_log"
+need_gone="fluxd flux_profiler flux_utility"
 manager_paths="/data/adb/ap/bin /data/adb/ksu/bin"
 
 for dir in $manager_paths; do

@@ -3,3 +3,6 @@ obj/
 libs/
 .idea/
 .vscode/
+
+# Host test suite output (jni/tests/run_tests.sh)
+jni/tests/build/

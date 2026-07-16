@@ -1,0 +1,36 @@
+# SynthesisCore dependency lock
+#
+# Flux consumes SynthesisCore as a prebuilt APK launched via app_process. The two are
+# separate repositories and stay that way: there is no submodule and no symlink. This lock
+# pins exactly which SynthesisCore build Flux ships with, and scripts/verify-synthesiscore.sh
+# refuses to package anything whose bytes do not match.
+#
+# Fields:
+#   repository       owner/name of the SynthesisCore repository
+#   version          release tag the artifact came from
+#   commit           full 40-char commit SHA the release was built from
+#   asset            file name of the release asset
+#   sha256           SHA-256 of the exact artifact bytes (verified before use)
+#   schema_provided  telemetry schema version this artifact emits
+#   schema_min       lowest telemetry schema this Flux build can consume
+#   schema_max       highest telemetry schema this Flux build can consume
+#
+# The build fails if sha256 does not match, and warns (with the exact remaining step) if
+# schema_provided falls outside [schema_min, schema_max]. It never silently falls back to a
+# "latest" build.
+
+repository=FebriCahyaa/SynthesisCore
+version=unreleased-prebuilt
+commit=47d131b3157b6c7c22eea8db676eebeec0fa9763
+asset=synthesiscore.apk
+sha256=289455ed92e0b5433b91d12bd84bfeeea3ed06fb314b37435b47982a9dcd596b
+schema_provided=1
+schema_min=2
+schema_max=2
+
+# NOTE — this entry pins the CURRENT committed prebuilt, which is a schema-v1 build. This
+# Flux branch speaks schema v2 and is NOT compatible with it. Before release, SynthesisCore
+# must be built from its `feat/telemetry-contract-v2` branch, published as a release, and this
+# lock regenerated with scripts/update-synthesiscore-lock.sh so that schema_provided becomes 2
+# and version/commit/sha256 point at the real v2 asset. verify-synthesiscore.sh prints exactly
+# this instruction when it detects the schema gap.

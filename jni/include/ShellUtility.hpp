@@ -1,5 +1,9 @@
 /*
+ * Copyright (C) 2024-2026 Rem01Gaming
  * Copyright (C) 2024-2026 FebriCahyaa
+ *
+ * Adapted from Encore Tweaks (https://github.com/Rem01Gaming/encore).
+ * Modified by the Flux project.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,6 +20,10 @@
 
 #pragma once
 
+// <cstdarg> for va_start/va_end. libc++ (the NDK) happens to expose these via <cstdio>, but
+// libstdc++ does not, so the omission only surfaced once these headers were first parsed by a
+// host compiler. Include it explicitly rather than depend on a transitive include.
+#include <cstdarg>
 #include <cstdio>
 #include <memory>
 #include <vector>

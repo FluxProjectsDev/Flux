@@ -1,0 +1,18 @@
+LOCAL_PATH := $(call my-dir)
+ROOT_PATH := $(call my-dir)/../..
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := FluxTelemetry
+
+LOCAL_SRC_FILES := $(wildcard $(LOCAL_PATH)/*.cpp)
+LOCAL_SRC_FILES := $(LOCAL_SRC_FILES:$(LOCAL_PATH)/%=%)
+
+# RuntimeSnapshotAssembler emits the Decision Engine's RuntimeSnapshot type (header only).
+LOCAL_C_INCLUDES := $(ROOT_PATH)/include $(ROOT_PATH)/engine/decision
+
+LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)
+
+LOCAL_CPPFLAGS += -fexceptions -std=c++23 -O2
+LOCAL_CPPFLAGS += -Wpedantic -Wall -Wextra -Werror -Wformat -Wuninitialized
+
+include $(BUILD_STATIC_LIBRARY)

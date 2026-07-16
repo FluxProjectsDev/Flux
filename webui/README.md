@@ -1,6 +1,6 @@
-# encore
+# Flux WebUI
 
-This template should help get you started developing with Vue 3 in Vite.
+The Flux Console — the module WebUI for Flux Tweaks, built with Vue 3 and Vite.
 
 ## Recommended IDE Setup
 

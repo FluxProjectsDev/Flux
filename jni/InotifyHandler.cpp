@@ -1,5 +1,9 @@
 /*
+ * Copyright (C) 2024-2026 Rem01Gaming
  * Copyright (C) 2024-2026 FebriCahyaa
+ *
+ * Adapted from Encore Tweaks (https://github.com/Rem01Gaming/encore).
+ * Modified by the Flux project.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,6 +27,7 @@
 #include <FluxLog.hpp>
 #include <FluxUtility.hpp>
 #include <GameRegistry.hpp>
+#include <InotifyEvents.hpp>
 #include <SynthesisCore.hpp>
 
 // signal_daemon_update and signal_daemon_stop are defined in Main.cpp
@@ -64,16 +69,25 @@ void on_json_modified(const struct inotify_event *event, const std::string &path
     };
 
     auto OnSynthesisCoreModified = [&](const std::string &path) -> void {
-        // Spammy log...
-        // LOGD_TAG("InotifyHandler", "Callback OnSynthesisCoreModified reached");
+        // Not logged on the happy path: this fires twice a second.
 
-        SynthesisCore status;
-        if (SynthesisCoreReader::read(status, path.c_str())) {
-            synthesis_core_cache.update(status);
-            signal_daemon_update(); // Wake up the daemon immediately
-        } else {
-            LOGW_TAG("InotifyHandler", "Failed to parse synthesis_core file: {}", path);
+        TelemetrySnapshot snapshot;
+        const auto result = SynthesisCoreReader::read(snapshot, path.c_str(), flux_monotonic_ms());
+
+        if (!result.ok()) {
+            // The last good snapshot is deliberately left in place. A malformed update is not
+            // a reason to forget what we already knew; the freshness check will downgrade us
+            // if the producer stays broken.
+            synthesis_core_cache.record_parse_error(result.error, result.detail);
+            LOGW_TAG(
+                "InotifyHandler", "Rejected synthesis_core snapshot ({}): {}",
+                parse_error_string(result.error), result.detail
+            );
+            return;
         }
+
+        synthesis_core_cache.update(snapshot);
+        signal_daemon_update(); // Wake the daemon immediately
     };
 
     auto OnModuleUpdateCreated = [&]() -> void {
@@ -82,8 +96,22 @@ void on_json_modified(const struct inotify_event *event, const std::string &path
         signal_daemon_stop();
     };
 
-    // React immediately after the writer has closed the file
-    if (event->mask & IN_CLOSE_WRITE) {
+    // The kernel dropped events. We cannot know what we missed, so re-read everything rather
+    // than assume our view is current.
+    if (is_overflow(event->mask)) {
+        LOGW_TAG("InotifyHandler", "inotify queue overflowed, re-reading watched files");
+        OnSynthesisCoreModified(SYNTHESIS_CORE_FILE);
+        return;
+    }
+
+    // React to *any* event that means the file has new content.
+    //
+    // is_content_update() accepts IN_CLOSE_WRITE and IN_MOVED_TO. The second one is the
+    // important one and was previously missing: SynthesisCore replaces the status file with
+    // rename(), and a rename never delivers IN_CLOSE_WRITE on the destination name — only
+    // IN_MOVED_TO. Gating on IN_CLOSE_WRITE alone meant the telemetry cache was seeded once
+    // at startup and then never updated again for the entire uptime of the device.
+    if (is_content_update(event->mask)) {
         switch (context) {
             case WATCH_CONTEXT_GAMELIST: OnGamelistModified(path); break;
             case WATCH_CONTEXT_CONFIG: OnConfigModified(path); break;
@@ -95,7 +123,7 @@ void on_json_modified(const struct inotify_event *event, const std::string &path
 
     // React when MODULE_UPDATE is created inside MODPATH directory
     if ((event->mask & IN_CREATE) && context == WATCH_CONTEXT_MODULE_UPDATE) {
-        if (std::string(event->name) == "update") {
+        if (event->len > 0 && std::string(event->name) == "update") {
             OnModuleUpdateCreated();
         }
     }
@@ -112,15 +140,6 @@ bool init_file_watcher(InotifyWatcher &watcher) {
         // Apply log level from config
         auto prefs = config_store.get_preferences();
         FluxLog::set_log_level(prefs.log_level);
-
-        // Seed the cache with whatever is already on-disk (if any)
-        {
-            SynthesisCore initial;
-            if (SynthesisCoreReader::read(initial)) {
-                synthesis_core_cache.update(initial);
-                LOGD_TAG("InotifyHandler", "Pre-seeded SynthesisCoreCache from existing status file");
-            }
-        }
 
         // Set up file watchers
         InotifyWatcher::WatchReference gamelist_ref{FLUX_GAMELIST, on_json_modified, WATCH_CONTEXT_GAMELIST, nullptr};
@@ -164,7 +183,39 @@ bool init_file_watcher(InotifyWatcher &watcher) {
             return false;
         }
 
-        watcher.start();
+        // Seed *after* the watches are registered, not before.
+        //
+        // The watch is live from the moment inotify_add_watch() returns, and the kernel queues
+        // events for us even though the reader thread has not started yet. Seeding in this
+        // order means an update that lands during startup is either captured by this read or
+        // still sitting in the kernel queue for start() to drain — it cannot fall through the
+        // gap between the two, which it could when the seed ran first.
+        {
+            TelemetrySnapshot initial;
+            const auto result =
+                SynthesisCoreReader::read(initial, SYNTHESIS_CORE_FILE, flux_monotonic_ms());
+
+            if (result.ok()) {
+                synthesis_core_cache.update(initial);
+                LOGI_TAG(
+                    "InotifyHandler", "Seeded telemetry from existing snapshot (sequence {})",
+                    initial.sequence
+                );
+            } else {
+                // Not fatal. SynthesisCore may simply not have written its first snapshot yet;
+                // the daemon starts in a safe profile and picks it up when it arrives.
+                synthesis_core_cache.record_parse_error(result.error, result.detail);
+                LOGW_TAG(
+                    "InotifyHandler", "No usable telemetry at startup ({}): {}",
+                    parse_error_string(result.error), result.detail
+                );
+            }
+        }
+
+        if (!watcher.start()) {
+            LOGE_TAG("InotifyWatcher", "Failed to start watcher thread");
+            return false;
+        }
         return true;
     } catch (const std::runtime_error &e) {
         std::string error_msg = e.what();

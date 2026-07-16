@@ -1,16 +1,66 @@
 name: Sync release
+
+# Notifies a Flux-owned module-index repository when a Flux release is published.
+#
+# The destination is NOT hardcoded. It is read from the repository variable
+# FLUX_MODULE_INDEX_REPOSITORY (for example: "FebriCahyaa/flux-module-index").
+# When that variable is unset the job skips safely and the release still succeeds.
+#
+# Flux releases must never be dispatched to an Encore-owned repository. There is
+# deliberately no fallback destination.
+
 on:
   release:
     types: [published]
+  workflow_dispatch:
+
+# Least privilege: this workflow only reads the repository. The cross-repository
+# dispatch is authenticated by a narrowly scoped PAT stored in FLUX_MODULE_INDEX_PAT.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   dispatch:
+    name: Dispatch to Flux module index
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Trigger workflow
+      - name: Resolve destination
+        id: target
+        env:
+          DEST: ${{ vars.FLUX_MODULE_INDEX_REPOSITORY }}
+        run: |
+          if [ -z "$DEST" ]; then
+            echo "::notice::FLUX_MODULE_INDEX_REPOSITORY is not set; external module-index sync is disabled. Release is unaffected."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$DEST" in
+            KernelSU-Modules-Repo/*|*/encore|*encore*)
+              echo "::error::Refusing to dispatch a Flux release to an Encore-related destination ('$DEST'). Configure a Flux-owned repository."
+              exit 1
+              ;;
+          esac
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          echo "repository=$DEST" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Flux module index
+        if: steps.target.outputs.enabled == 'true'
+        # TODO: pin to a full commit SHA via Dependabot (see dependency-update policy).
         uses: peter-evans/repository-dispatch@v4
         with:
-          token: ${{ secrets.REPO_SYNC_PAT }}
-          repository: KernelSU-Modules-Repo/encore
-          event-type: sync-release
-          client-payload: '{"ref": "${{ github.ref }}", "sha": "${{ github.sha }}", "version": "${{ github.event.release.tag_name }}"}'
+          token: ${{ secrets.FLUX_MODULE_INDEX_PAT }}
+          repository: ${{ steps.target.outputs.repository }}
+          event-type: flux-release-published
+          client-payload: |
+            {
+              "project": "Flux",
+              "ref": "${{ github.ref }}",
+              "sha": "${{ github.sha }}",
+              "version": "${{ github.event.release.tag_name }}",
+              "release_url": "${{ github.event.release.html_url }}"
+            }
