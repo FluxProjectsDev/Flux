@@ -28,7 +28,6 @@
 #include <FluxUtility.hpp>
 #include <GameRegistry.hpp>
 #include <InotifyEvents.hpp>
-#include <SynthesisCore.hpp>
 
 // signal_daemon_update and signal_daemon_stop are defined in Main.cpp
 extern void signal_daemon_update();
@@ -38,7 +37,6 @@ enum WatchContext {
     WATCH_CONTEXT_GAMELIST,
     WATCH_CONTEXT_CONFIG,
     WATCH_CONTEXT_DEVICE_MITIGATION,
-    WATCH_CONTEXT_SYNTHESIS_CORE,
     WATCH_CONTEXT_MODULE_UPDATE,
 };
 
@@ -68,28 +66,6 @@ void on_json_modified(const struct inotify_event *event, const std::string &path
         FluxLog::set_log_level(prefs.log_level);
     };
 
-    auto OnSynthesisCoreModified = [&](const std::string &path) -> void {
-        // Not logged on the happy path: this fires twice a second.
-
-        TelemetrySnapshot snapshot;
-        const auto result = SynthesisCoreReader::read(snapshot, path.c_str(), flux_monotonic_ms());
-
-        if (!result.ok()) {
-            // The last good snapshot is deliberately left in place. A malformed update is not
-            // a reason to forget what we already knew; the freshness check will downgrade us
-            // if the producer stays broken.
-            synthesis_core_cache.record_parse_error(result.error, result.detail);
-            LOGW_TAG(
-                "InotifyHandler", "Rejected synthesis_core snapshot ({}): {}",
-                parse_error_string(result.error), result.detail
-            );
-            return;
-        }
-
-        synthesis_core_cache.update(snapshot);
-        signal_daemon_update(); // Wake the daemon immediately
-    };
-
     auto OnModuleUpdateCreated = [&]() -> void {
         LOGI_TAG("InotifyHandler", "Module update file detected, signaling daemon to stop");
         notify("Please reboot your device to complete module update.");
@@ -97,10 +73,13 @@ void on_json_modified(const struct inotify_event *event, const std::string &path
     };
 
     // The kernel dropped events. We cannot know what we missed, so re-read everything rather
-    // than assume our view is current.
+    // than assume our view is current. Telemetry is not re-read here: AtomicStatusWatcher owns
+    // the status file and handles IN_Q_OVERFLOW itself, flagging the resync as uncertain.
     if (is_overflow(event->mask)) {
         LOGW_TAG("InotifyHandler", "inotify queue overflowed, re-reading watched files");
-        OnSynthesisCoreModified(SYNTHESIS_CORE_FILE);
+        OnGamelistModified(FLUX_GAMELIST);
+        OnConfigModified(CONFIG_FILE);
+        OnDeviceMitigationModified(DEVICE_MITIGATION_FILE);
         return;
     }
 
@@ -116,7 +95,6 @@ void on_json_modified(const struct inotify_event *event, const std::string &path
             case WATCH_CONTEXT_GAMELIST: OnGamelistModified(path); break;
             case WATCH_CONTEXT_CONFIG: OnConfigModified(path); break;
             case WATCH_CONTEXT_DEVICE_MITIGATION: OnDeviceMitigationModified(path); break;
-            case WATCH_CONTEXT_SYNTHESIS_CORE: OnSynthesisCoreModified(path); break;
             default: break;
         }
     }
@@ -150,10 +128,6 @@ bool init_file_watcher(InotifyWatcher &watcher) {
             DEVICE_MITIGATION_FILE, on_json_modified, WATCH_CONTEXT_DEVICE_MITIGATION, nullptr
         };
 
-        InotifyWatcher::WatchReference synthesis_core_ref{
-            SYNTHESIS_CORE_FILE, on_json_modified, WATCH_CONTEXT_SYNTHESIS_CORE, nullptr
-        };
-
         // Watch the module directory for creation of the "update" file.
         // The file does not exist yet, so we must watch the parent directory.
         InotifyWatcher::WatchReference module_update_ref{MODPATH, on_json_modified, WATCH_CONTEXT_MODULE_UPDATE, nullptr};
@@ -173,44 +147,15 @@ bool init_file_watcher(InotifyWatcher &watcher) {
             return false;
         }
 
-        if (!watcher.addFile(synthesis_core_ref)) {
-            LOGE_TAG("InotifyWatcher", "Failed to add synthesis_core watch");
-            return false;
-        }
-
         if (!watcher.addDirectory(module_update_ref)) {
             LOGE_TAG("InotifyWatcher", "Failed to add module update watch");
             return false;
         }
 
-        // Seed *after* the watches are registered, not before.
-        //
-        // The watch is live from the moment inotify_add_watch() returns, and the kernel queues
-        // events for us even though the reader thread has not started yet. Seeding in this
-        // order means an update that lands during startup is either captured by this read or
-        // still sitting in the kernel queue for start() to drain — it cannot fall through the
-        // gap between the two, which it could when the seed ran first.
-        {
-            TelemetrySnapshot initial;
-            const auto result =
-                SynthesisCoreReader::read(initial, SYNTHESIS_CORE_FILE, flux_monotonic_ms());
-
-            if (result.ok()) {
-                synthesis_core_cache.update(initial);
-                LOGI_TAG(
-                    "InotifyHandler", "Seeded telemetry from existing snapshot (sequence {})",
-                    initial.sequence
-                );
-            } else {
-                // Not fatal. SynthesisCore may simply not have written its first snapshot yet;
-                // the daemon starts in a safe profile and picks it up when it arrives.
-                synthesis_core_cache.record_parse_error(result.error, result.detail);
-                LOGW_TAG(
-                    "InotifyHandler", "No usable telemetry at startup ({}): {}",
-                    parse_error_string(result.error), result.detail
-                );
-            }
-        }
+        // Telemetry is deliberately NOT seeded here any more. AtomicStatusWatcher owns the
+        // status file: it registers its own directory watch before its first read, so the
+        // startup race this seeding used to close is now handled inside the telemetry runtime.
+        // Seeding here as well would create a second telemetry path.
 
         if (!watcher.start()) {
             LOGE_TAG("InotifyWatcher", "Failed to start watcher thread");

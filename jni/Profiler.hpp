@@ -18,6 +18,27 @@
 * limitations under the License.
 */
 
+#include <functional>
+#include <optional>
+
+#include <TelemetrySnapshot.hpp> // flux::telemetry::RawSnapshot
+
+/**
+ * @brief Supplies the profiler with the current telemetry snapshot.
+ *
+ * The profiler must not own or reach into a telemetry cache of its own. There is exactly one
+ * live telemetry authority — TelemetryRuntime, owned by the daemon — and the profiler reads it
+ * through this injected provider. That keeps the ownership explicit, prevents a second telemetry
+ * path from reappearing, and lets host tests drive the profiler without a device.
+ *
+ * Returning nullopt means "nothing valid has been published"; the profiler must then choose the
+ * safest defaults rather than treating absent capabilities as present.
+ */
+using TelemetryProvider = std::function<std::optional<flux::telemetry::RawSnapshot>()>;
+
+/** Install the provider. Called once by the daemon at startup. */
+void set_telemetry_provider(TelemetryProvider provider);
+
 /**
  * @brief Sets all environment variables for the profiler
  */

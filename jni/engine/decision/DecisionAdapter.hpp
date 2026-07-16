@@ -50,11 +50,31 @@ public:
     explicit FluxDecisionService(flux::engine::DecisionConfig config = {}) : engine_(config) {}
 
     /**
-     * @brief Decide the profile for this cycle, in the daemon's legacy shape.
+     * @brief Decide the profile for this cycle from an already-normalized V2 snapshot.
+     *
+     * This is the live runtime entry point. The daemon assembles one complete
+     * `DecisionInputs` per evaluation via `flux::telemetry::RuntimeSnapshotAssembler`,
+     * so no telemetry interpretation happens here or in Main.cpp — the snapshot is
+     * already validated and normalized when it arrives.
      *
      * @p state.current is treated as authoritative on entry (so a caller that
      * rolled it back after a failed apply is respected), and is written back to
      * reflect the new decision.
+     */
+    [[nodiscard]] PolicyDecision decide(const flux::engine::DecisionInputs &inputs,
+                                        PolicyState &state, int64_t now_ms);
+
+    /**
+     * @brief Decide from the daemon's legacy inputs.
+     *
+     * Retained only for the parity harness, which proves the V2 engine agrees with the
+     * legacy policy across a matrix of inputs. It builds a `DecisionInputs` through the
+     * `compat::build_*` helpers and delegates to the V2 overload above, so there remains
+     * exactly one Decision Engine invocation path.
+     *
+     * **Removal condition:** delete together with the `compat::build_*` helpers and the
+     * legacy telemetry types once the parity harness is retired — no live runtime caller
+     * remains as of the V2 telemetry cutover.
      */
     [[nodiscard]] PolicyDecision decide(const PolicyInputs &inputs, PolicyState &state,
                                         int64_t now_ms);

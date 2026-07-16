@@ -99,23 +99,15 @@ CapabilitySnapshot build_capabilities(const std::optional<TelemetrySnapshot> &sn
 
 } // namespace flux::engine::compat
 
-PolicyDecision FluxDecisionService::decide(const PolicyInputs &inputs, PolicyState &state,
-                                           int64_t now_ms) {
+PolicyDecision FluxDecisionService::decide(const flux::engine::DecisionInputs &inputs,
+                                           PolicyState &state, int64_t now_ms) {
     using namespace flux::engine;
 
     // Respect the daemon's authoritative view of the current profile (e.g. after a
     // failed apply rolled it back), while keeping the richer hysteresis/edge state.
     engine_state_.current = compat::from_flux_profile(state.current);
 
-    DecisionInputs in;
-    in.runtime = compat::build_runtime_snapshot(inputs.health, inputs.snapshot);
-    in.capabilities = compat::build_capabilities(inputs.snapshot);
-    in.session.in_session = inputs.in_game_session;
-    in.session.package = inputs.active_package;
-    in.session.forces_lite = inputs.game_forces_lite;
-    in.shutdown_requested = inputs.shutdown_requested;
-
-    const Decision d = engine_.evaluate(in, engine_state_, now_ms);
+    const Decision d = engine_.evaluate(inputs, engine_state_, now_ms);
     engine_state_ = d.next_state;
     last_ = d;
 
@@ -129,4 +121,22 @@ PolicyDecision FluxDecisionService::decide(const PolicyInputs &inputs, PolicySta
     out.changed = d.transition_required;
     out.safety_driven = d.safety_driven;
     return out;
+}
+
+PolicyDecision FluxDecisionService::decide(const PolicyInputs &inputs, PolicyState &state,
+                                           int64_t now_ms) {
+    using namespace flux::engine;
+
+    // Translate the legacy shape, then take the single V2 evaluation path above. Keeping one
+    // invocation path is what makes the parity harness meaningful: it exercises the same engine
+    // call the live daemon makes, not a parallel copy of it.
+    DecisionInputs in;
+    in.runtime = compat::build_runtime_snapshot(inputs.health, inputs.snapshot);
+    in.capabilities = compat::build_capabilities(inputs.snapshot);
+    in.session.in_session = inputs.in_game_session;
+    in.session.package = inputs.active_package;
+    in.session.forces_lite = inputs.game_forces_lite;
+    in.shutdown_requested = inputs.shutdown_requested;
+
+    return decide(in, state, now_ms);
 }

@@ -30,7 +30,24 @@
 #include "FluxConfigStore.hpp"
 
 #include <FluxUtility.hpp>
-#include <SynthesisCore.hpp>
+#include <utility>
+
+namespace {
+/// The single injected view onto the live telemetry authority. Empty until the daemon installs
+/// it, in which case every read reports "nothing published" and the safe defaults apply.
+TelemetryProvider g_telemetry_provider;
+} // namespace
+
+void set_telemetry_provider(TelemetryProvider provider) {
+    g_telemetry_provider = std::move(provider);
+}
+
+namespace {
+/// Read the live snapshot, or nullopt when no provider is installed / nothing is published.
+std::optional<flux::telemetry::RawSnapshot> current_telemetry() {
+    return g_telemetry_provider ? g_telemetry_provider() : std::nullopt;
+}
+} // namespace
 
 void set_profiler_env_vars() {
     // Get preferences from config store
@@ -75,7 +92,7 @@ void set_profiler_env_vars() {
     // Writing to unsupported sysfs nodes on certain vendor kernels can cause
     // hard hangs or kernel oops, leading to device freeze or reboot.
     {
-        const auto status = synthesis_core_cache.get();
+        const auto status = current_telemetry();
         if (status.has_value()) {
             setenv("FLUX_IS_GKI_KERNEL", status->kernel_is_gki ? "1" : "0", 1);
             setenv("FLUX_THERMAL_API_AVAILABLE", status->thermal_available ? "1" : "0", 1);
@@ -109,9 +126,9 @@ void apply_performance_profile(bool lite_mode, std::string game_pkg, pid_t game_
     set_profiler_env_vars();
 
     uid_t game_uid = 0;
-    const auto status = synthesis_core_cache.get();
+    const auto status = current_telemetry();
     if (status.has_value() && status->focused_package == game_pkg && status->focused_uid > 0) {
-        game_uid = status->focused_uid;
+        game_uid = static_cast<uid_t>(status->focused_uid);
     } else {
         game_uid = get_uid_by_package_name(game_pkg);
     }
@@ -142,9 +159,9 @@ void apply_performance_lite_profile(std::string game_pkg, pid_t game_pid) {
     set_profiler_env_vars();
 
     uid_t game_uid = 0;
-    const auto status = synthesis_core_cache.get();
+    const auto status = current_telemetry();
     if (status.has_value() && status->focused_package == game_pkg && status->focused_uid > 0) {
-        game_uid = status->focused_uid;
+        game_uid = static_cast<uid_t>(status->focused_uid);
     } else {
         game_uid = get_uid_by_package_name(game_pkg);
     }

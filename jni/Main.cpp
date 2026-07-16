@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -34,7 +35,9 @@
 #include "InotifyHandler.hpp"
 #include "Profiler.hpp"
 
-#include <DecisionAdapter.hpp> // Flux V2 Decision Engine (pulls in ProfilePolicy.hpp types)
+#include <DecisionAdapter.hpp>          // Flux V2 Decision Engine (pulls in ProfilePolicy.hpp types)
+#include <RuntimeSnapshotAssembler.hpp>  // normalization boundary: RawSnapshot -> RuntimeSnapshot
+#include <TelemetryRuntime.hpp>          // the single live telemetry authority
 
 #include <Flux.hpp>
 #include <FluxLog.hpp>
@@ -77,6 +80,11 @@ void notify_fatal_error(const std::string &error_msg) {
 // ---------------------------------------------------------------------------
 
 int synthesis_core_event_fd = -1;
+
+/// The one and only live telemetry authority: watcher -> ingestor -> decoder -> freshness ->
+/// store. Constructed in run_daemon() once the wake path exists, because its delivery callback
+/// signals the daemon. Nothing else in the process may hold telemetry state.
+static std::unique_ptr<flux::telemetry::TelemetryRuntime> telemetry_runtime;
 
 std::atomic<bool> daemon_stop_requested{false};
 
@@ -166,7 +174,6 @@ struct DaemonState {
     /// runtime decision path.
     FluxDecisionService decision_service{};
     PolicyState policy_state{};
-    FreshnessPolicy freshness{};
     TransitionHistory history{64};
 
     std::string active_package;
@@ -202,7 +209,8 @@ static constexpr int DAEMON_TICK_MS = 1000;
 /**
  * @brief Returns the package name of the focused registered game, or empty if none.
  */
-[[nodiscard]] static std::string get_active_game(const TelemetrySnapshot &snap, GameRegistry &registry) {
+[[nodiscard]] static std::string get_active_game(const flux::telemetry::RawSnapshot &snap,
+                                                GameRegistry &registry) {
     if (!snap.foreground_available) return {};
     if (registry.is_game_registered(snap.focused_package)) {
         return snap.focused_package;
@@ -217,7 +225,8 @@ static constexpr int DAEMON_TICK_MS = 1000;
  * are not mistaken for a genuine exit. Process death is handled by the PID tracker callback,
  * so this only examines focus.
  */
-[[nodiscard]] static bool is_game_still_active(DaemonState &state, const TelemetrySnapshot &snap) {
+[[nodiscard]] static bool is_game_still_active(DaemonState &state,
+                                              const flux::telemetry::RawSnapshot &snap) {
     if (snap.focused_package == state.active_package) {
         state.focus_loss_count = 0;
         return true;
@@ -237,9 +246,10 @@ static constexpr int DAEMON_TICK_MS = 1000;
 /**
  * @brief Returns the PID of @p package_name, or 0 on failure.
  */
-[[nodiscard]] static pid_t pidof_game(const std::string &package_name, const std::optional<TelemetrySnapshot> &snap) {
+[[nodiscard]] static pid_t pidof_game(const std::string &package_name,
+                                      const std::optional<flux::telemetry::RawSnapshot> &snap) {
     if (snap && snap->focused_package == package_name && snap->focused_pid > 0) {
-        return snap->focused_pid;
+        return static_cast<pid_t>(snap->focused_pid);
     }
 
     const pid_t pid = pidof(package_name, false);
@@ -325,12 +335,51 @@ static void handle_game_exit(DaemonState &state) {
  * is pure and covered by host tests. Everything here is the side effects: applying the profile,
  * driving zen, and recording what happened and why.
  */
+/**
+ * @brief Map V2 telemetry health onto the daemon's legacy record vocabulary.
+ *
+ * Only the transition-history/diagnostics record still speaks the legacy enum. The richer V2
+ * states collapse the same way the Decision Engine sees them: Delayed and Stale both mean "hold,
+ * never promote", while Invalid/Unavailable/UnsupportedSchema all mean "no trustworthy data".
+ *
+ * Removal condition: delete together with TransitionRecord once the record/diagnostics types are
+ * V2-native (Diagnostics phase).
+ */
+[[nodiscard]] static TelemetryHealth to_record_health(flux::telemetry::TelemetryHealth health) {
+    switch (health) {
+        case flux::telemetry::TelemetryHealth::Healthy: return TelemetryHealth::Healthy;
+        case flux::telemetry::TelemetryHealth::Delayed:
+        case flux::telemetry::TelemetryHealth::Stale:
+            return TelemetryHealth::Stale;
+        case flux::telemetry::TelemetryHealth::Invalid:
+        case flux::telemetry::TelemetryHealth::Unavailable:
+        case flux::telemetry::TelemetryHealth::UnsupportedSchema:
+            return TelemetryHealth::Offline;
+    }
+    return TelemetryHealth::Offline;
+}
+
 static void evaluate_and_apply(DaemonState &state, int64_t now_ms) {
-    const auto snapshot = synthesis_core_cache.get();
-    const auto health   = synthesis_core_cache.health(now_ms, state.freshness);
+    using flux::telemetry::RawSnapshot;
+    using flux::telemetry::RuntimeSnapshotAssembler;
+
+    // Age the published health first: a dead producer emits no events, so only this tick can
+    // move telemetry Healthy -> Stale -> Unavailable.
+    telemetry_runtime->tick();
+
+    const auto published = telemetry_runtime->get();
+
+    // Absent telemetry is modelled as "nothing published", never as zeroed fields. A default
+    // RawSnapshot paired with Unavailable normalizes to DataHealth::Offline, which the engine
+    // already treats as "fall back to a safe profile".
+    const std::optional<RawSnapshot> snapshot =
+        published ? std::optional<RawSnapshot>(published->snapshot) : std::nullopt;
+    const flux::telemetry::TelemetryHealth health =
+        published ? published->health : flux::telemetry::TelemetryHealth::Unavailable;
+    const bool telemetry_healthy = (health == flux::telemetry::TelemetryHealth::Healthy);
 
     // A healthy snapshot proves SynthesisCore came back.
-    if (health == TelemetryHealth::Healthy && synthesiscore_down.exchange(false, std::memory_order_relaxed)) {
+    if (telemetry_healthy && synthesiscore_down.exchange(false, std::memory_order_relaxed)) {
         LOGI("SynthesisCore telemetry restored (sequence {})", snapshot ? snapshot->sequence : 0);
         set_module_description_status("\xF0\x9F\x98\x8B Tweaks applied successfully");
     }
@@ -338,7 +387,7 @@ static void evaluate_and_apply(DaemonState &state, int64_t now_ms) {
     // --- Game session bookkeeping ------------------------------------------
     // Only trust a healthy snapshot to *start* a session. A stale one may name a game that
     // exited minutes ago.
-    if (snapshot && health == TelemetryHealth::Healthy) {
+    if (snapshot && telemetry_healthy) {
         if (state.in_game_session && !state.active_package.empty()) {
             if (!is_game_still_active(state, *snapshot)) [[unlikely]] {
                 handle_game_exit(state);
@@ -379,12 +428,22 @@ static void evaluate_and_apply(DaemonState &state, int64_t now_ms) {
         handle_game_exit(state);
     }
 
-    PolicyInputs inputs;
-    inputs.health          = health;
-    inputs.snapshot        = snapshot;
-    inputs.in_game_session = state.in_game_session;
-    inputs.active_package  = state.active_package;
-    inputs.game_forces_lite =
+    // Normalize once, through the assembler. Main.cpp never interprets telemetry itself: it does
+    // not read thermal headroom, decide profiles, or invent values for absent providers. The
+    // assembler resolves the foreground provider by priority (native ProcessEventSource when it
+    // exists -> SynthesisCore fallback -> unavailable); nullopt below means no native provider is
+    // implemented yet.
+    const RawSnapshot raw = snapshot ? *snapshot : RawSnapshot{};
+    const RuntimeSnapshotAssembler assembler;
+    const auto assembled =
+        assembler.assemble(raw, health, RuntimeSnapshotAssembler::select_foreground(std::nullopt, raw));
+
+    flux::engine::DecisionInputs inputs;
+    inputs.runtime      = assembled.runtime;
+    inputs.capabilities = assembled.capabilities;
+    inputs.session.in_session = state.in_game_session;
+    inputs.session.package    = state.active_package;
+    inputs.session.forces_lite =
         game_entry ? (game_entry->lite_mode || config_store.get_preferences().enforce_lite_mode) : false;
     inputs.shutdown_requested = daemon_stop_requested.load(std::memory_order_relaxed);
 
@@ -444,7 +503,7 @@ static void evaluate_and_apply(DaemonState &state, int64_t now_ms) {
     record.reason       = decision.reason;
     record.monotonic_ms = now_ms;
     record.package      = state.active_package;
-    record.health       = health;
+    record.health       = to_record_health(health);
     record.applied      = applied;
     record.apply_error  = apply_error;
     if (snapshot && snapshot->has_thermal()) {
@@ -572,6 +631,28 @@ int run_daemon() {
         return EXIT_FAILURE;
     }
 
+    // Bring up the single live telemetry authority. The watcher registers its directory watch
+    // before the first read, so a snapshot written during startup is either seen by that read or
+    // still queued for the worker — it cannot fall through the gap between the two.
+    telemetry_runtime = std::make_unique<flux::telemetry::TelemetryRuntime>(
+        CONFIG_DIR, "synthesis_core.json", [] { return flux_monotonic_ms(); },
+        [] { signal_daemon_update(); }
+    );
+    if (!telemetry_runtime->start()) {
+        LOGC("Failed to start telemetry watcher: {}", telemetry_runtime->last_error());
+        notify_fatal_error("Failed to start telemetry watcher");
+        close(synthesis_core_event_fd);
+        synthesis_core_event_fd = -1;
+        return EXIT_FAILURE;
+    }
+
+    // The profiler reads telemetry through the same authority instead of a cache of its own.
+    set_telemetry_provider([]() -> std::optional<flux::telemetry::RawSnapshot> {
+        const auto published = telemetry_runtime->get();
+        if (!published) return std::nullopt;
+        return published->snapshot;
+    });
+
     // Give SynthesisCore a grace period to come up, but do not make Flux's existence
     // conditional on it.
     //
@@ -616,6 +697,12 @@ int run_daemon() {
     flux_main_daemon();
 
     LOGW("Flux Tweaks daemon exited");
+
+    // Stop the watcher and join its worker before the wake descriptor it signals is closed.
+    if (telemetry_runtime) {
+        telemetry_runtime->stop();
+        set_telemetry_provider(nullptr); // no reads after the authority is gone
+    }
 
     if (synthesis_core_event_fd >= 0) {
         close(synthesis_core_event_fd);
