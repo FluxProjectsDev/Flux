@@ -97,19 +97,22 @@ jobs:
             exit 1
           fi
 
-          NOTES="Automated Flux build from ${COMMIT}."
+          # Generate the update manifest module managers poll (Magisk / KernelSU / APatch).
+          # It must describe this exact tag and zip, so it is built here rather than committed.
+          bash .github/scripts/gen_update_json.sh "$TAG" "$ZIP" update.json
 
           # Idempotent: create the release the first time, then re-upload (clobber) on re-runs
-          # of the same tag rather than failing.
+          # of the same tag rather than failing. changelog.md ships as an asset so the manifest
+          # can pin its changelog URL to this release instead of a moving branch.
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG exists; uploading asset (clobber)."
-            gh release upload "$TAG" "$ZIP" --clobber
+            echo "Release $TAG exists; uploading assets (clobber)."
+            gh release upload "$TAG" "$ZIP" update.json changelog.md --clobber
           else
             FLAGS=()
             if [ "$PRERELEASE" = "true" ]; then FLAGS+=(--prerelease); fi
-            gh release create "$TAG" "$ZIP" \
+            gh release create "$TAG" "$ZIP" update.json changelog.md \
               --title "Flux ${TAG}" \
-              --notes "$NOTES" \
+              --notes-file changelog.md \
               --target "$COMMIT" \
               "${FLAGS[@]}"
           fi
