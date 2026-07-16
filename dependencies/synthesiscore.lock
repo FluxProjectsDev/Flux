@@ -19,18 +19,11 @@
 # schema_provided falls outside [schema_min, schema_max]. It never silently falls back to a
 # "latest" build.
 
-repository=FebriCahyaa/SynthesisCore
-version=unreleased-prebuilt
-commit=47d131b3157b6c7c22eea8db676eebeec0fa9763
-asset=synthesiscore.apk
-sha256=289455ed92e0b5433b91d12bd84bfeeea3ed06fb314b37435b47982a9dcd596b
-schema_provided=1
+repository=elyraos-dev/SynthesisCore
+version=v1.0.1
+commit=4d82d8516c95fa6441ba942740a3f1844d853f4b
+asset=SynthesisCore-v1.0.1.apk
+sha256=08931b73e3c7bf37ed20af92c14eb2c02129cf4745f3ebf080c10022254a8b92
+schema_provided=2
 schema_min=2
 schema_max=2
-
-# NOTE — this entry pins the CURRENT committed prebuilt, which is a schema-v1 build. This
-# Flux branch speaks schema v2 and is NOT compatible with it. Before release, SynthesisCore
-# must be built from its `feat/telemetry-contract-v2` branch, published as a release, and this
-# lock regenerated with scripts/update-synthesiscore-lock.sh so that schema_provided becomes 2
-# and version/commit/sha256 point at the real v2 asset. verify-synthesiscore.sh prints exactly
-# this instruction when it detects the schema gap.
