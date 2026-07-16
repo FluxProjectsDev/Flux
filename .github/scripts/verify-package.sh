@@ -93,7 +93,7 @@ for abi in ${ABIS}; do
 	*) want="" ;;
 	esac
 	got="$("${READELF}" --file-header "${BIN}" 2>/dev/null | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
-	if [ -n "${want}" ] && ! printf '%s' "${got}" | grep -qF "${want}"; then
+	if [ -n "${want}" ] && ! grep -qF "${want}" <<<"${got}"; then
 		fail "libs/${abi}/fluxd is '${got}', expected ${want}"
 	else
 		green "  ${abi}: fluxd present, ${got}, $(du -h "${BIN}" | cut -f1)"
@@ -104,7 +104,7 @@ done
 for dir in "${WORK}"/pkg/libs/*/; do
 	[ -d "${dir}" ] || continue
 	abi="$(basename "${dir}")"
-	if ! printf ' %s ' "${ABIS}" | grep -qF " ${abi} "; then
+	if ! grep -qF " ${abi} " <<<" ${ABIS} "; then
 		fail "package carries an unexpected ABI directory: libs/${abi}"
 	fi
 done
@@ -226,13 +226,13 @@ else
 	info "versionCode=${VERSION_CODE}"
 	info "updateJson=${UPDATE_JSON}"
 
-	if ! printf '%s' "${VERSION_CODE}" | grep -qE '^[0-9]+$'; then
+	if ! grep -qE '^[0-9]+$' <<<"${VERSION_CODE}"; then
 		fail "versionCode '${VERSION_CODE}' is not an integer; module managers compare it numerically"
 	else
 		green "  versionCode is an integer"
 	fi
 	# A literal placeholder means the stamping step did not run.
-	if printf '%s' "${VERSION}" | grep -qiE 'placeholder|@version'; then
+	if grep -qiE 'placeholder|@version' <<<"${VERSION}"; then
 		fail "version was never stamped: '${VERSION}'"
 	else
 		green "  version is stamped"
@@ -240,14 +240,14 @@ else
 	# The update manifest must point at the repository that built this package. Advertising
 	# someone else's releases is how a fork silently updates users to a foreign build.
 	if [ -n "${GITHUB_REPOSITORY:-}" ]; then
-		if printf '%s' "${UPDATE_JSON}" | grep -qF "github.com/${GITHUB_REPOSITORY}/"; then
+		if grep -qF "github.com/${GITHUB_REPOSITORY}/" <<<"${UPDATE_JSON}"; then
 			green "  updateJson points at this repository (${GITHUB_REPOSITORY})"
 		else
 			fail "updateJson '${UPDATE_JSON}' does not point at ${GITHUB_REPOSITORY}"
 		fi
 	fi
 	# Category E: no Encore-owned infrastructure, ever.
-	if printf '%s' "${UPDATE_JSON}" | grep -qiE 'rem01|encore'; then
+	if grep -qiE 'rem01|encore' <<<"${UPDATE_JSON}"; then
 		fail "updateJson points at Encore infrastructure: ${UPDATE_JSON}"
 	fi
 fi
@@ -288,10 +288,16 @@ fi
 # attribution for adapted files, which is required to ship and must never be "cleaned up".
 # So this looks only at code — comment lines are stripped before matching — which is where a
 # real dependency (a curl/wget target, an update endpoint) would have to live.
+#
+# The match deliberately does not pipe sed into `grep -q`. Under `set -o pipefail` that
+# combination is actively unsafe here: grep exits at the first match, sed dies of SIGPIPE, the
+# pipeline reports failure, and the `if` concludes "no match" — the check would go quiet
+# exactly when it found a real Encore endpoint. A verifier that passes when it should fail is
+# worse than no verifier, so the stripped text is materialised first and matched without a pipe.
 ENDPOINT_HITS=""
 while IFS= read -r f; do
-	if sed -E 's@(^|[[:space:]])(#|//).*$@@' "${f}" 2>/dev/null |
-		grep -qIE 'https?://[^"[:space:]]*(rem01|encore)'; then
+	stripped="$(sed -E 's@(^|[[:space:]])(#|//).*$@@' "${f}" 2>/dev/null || true)"
+	if grep -qIE 'https?://[^"[:space:]]*(rem01|encore)' <<<"${stripped}"; then
 		ENDPOINT_HITS="${ENDPOINT_HITS}${f}"$'\n'
 	fi
 done < <(find "${WORK}/pkg" -type f ! -name 'NOTICE.md' ! -name 'LICENSE' ! -name '*.sha256')

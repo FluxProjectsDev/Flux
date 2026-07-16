@@ -221,7 +221,7 @@ for ABI in ${ABIS}; do
 	info "${OBJ_COUNT} objects produced"
 
 	for obj in "${REQUIRED_OBJECTS[@]}"; do
-		if printf '%s\n' "${OBJ_LIST}" | grep -qxF "${obj}"; then
+		if grep -qxF "${obj}" <<<"${OBJ_LIST}"; then
 			green "  present: ${obj}"
 		else
 			fail "required object not produced: ${obj}"
@@ -229,7 +229,7 @@ for ABI in ${ABIS}; do
 	done
 
 	for obj in "${FORBIDDEN_OBJECTS[@]}"; do
-		if printf '%s\n' "${OBJ_LIST}" | grep -qxF "${obj}"; then
+		if grep -qxF "${obj}" <<<"${OBJ_LIST}"; then
 			fail "removed translation unit is being compiled again: ${obj}"
 			find "${OBJ_DIR}/${ABI}" -name "${obj}" >&2
 		else
@@ -275,7 +275,13 @@ for ABI in ${ABIS}; do
 	# binary every "absent" below would pass vacuously. Assert the section exists rather than
 	# guessing from a symbol count, which would be an arbitrary threshold that says nothing
 	# about whether the table was stripped.
-	if ! "${READELF}" --section-headers "${EXE}" 2>/dev/null | grep -qE '\.symtab'; then
+	# Read the section list into a variable first. Piping readelf's output straight into
+	# `grep -q` looks equivalent but is not: grep exits on the first match, readelf then dies
+	# of SIGPIPE, and `set -o pipefail` reports the whole pipeline as failed — so a binary that
+	# *does* have a .symtab is reported as stripped. It only shows up on real output sizes,
+	# where readelf is still writing when grep leaves.
+	SECTIONS="$("${READELF}" --section-headers "${EXE}" 2>/dev/null || true)"
+	if [[ "${SECTIONS}" != *.symtab* ]]; then
 		fail "${EXE} has no .symtab — it is stripped, so layer C would prove nothing."
 		fail "  ndk-build must keep obj/local/${ABI}/fluxd unstripped."
 		continue
@@ -341,7 +347,7 @@ for ABI in ${ABIS}; do
 		esac
 		if [ -n "${WANT_MACHINE}" ]; then
 			GOT_MACHINE="$("${READELF}" --file-header "${SHIPPED}" 2>/dev/null | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
-			if printf '%s' "${GOT_MACHINE}" | grep -qF "${WANT_MACHINE}"; then
+			if grep -qF "${WANT_MACHINE}" <<<"${GOT_MACHINE}"; then
 				green "  machine: ${GOT_MACHINE} (correct for ${ABI})"
 			else
 				fail "${SHIPPED} is '${GOT_MACHINE}', expected ${WANT_MACHINE} for ${ABI}"
