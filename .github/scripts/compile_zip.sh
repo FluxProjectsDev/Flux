@@ -19,6 +19,13 @@ release_code="$(git rev-list HEAD --count)-$(git rev-parse --short HEAD)-release
 sed -i "s/version=.*/version=$version ($release_code)/" module/module.prop
 sed -i "s/versionCode=.*/versionCode=$version_code/" module/module.prop
 
+# Point the module manager (Magisk / KernelSU / APatch) at this repository's update manifest.
+# It polls this URL, compares versionCode against the installed module, and offers a direct
+# download + install. `releases/latest` always resolves to the newest published release, so the
+# field never needs updating. Derived from GITHUB_REPOSITORY so a fork advertises its own
+# releases instead of someone else's.
+sed -i "s|updateJson=.*|updateJson=https://github.com/$GITHUB_REPOSITORY/releases/latest/download/update.json|" module/module.prop
+
 # Copy module files
 cp -r ./libs module
 cp -r ./scripts/* module/system/bin
