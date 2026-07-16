@@ -5,6 +5,16 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+      prerelease:
+        description: 'Mark the release as a pre-release'
+        type: boolean
+        required: false
+        default: false
   push:
     branches:
       - main
@@ -28,6 +38,10 @@ jobs:
   build:
     name: Build Flashable Zip
     runs-on: ubuntu-latest
+    # Publishing a release needs write access to repository contents. Scoped to this job so the
+    # default stays least-privilege; only the release upload elevates.
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -62,6 +76,43 @@ jobs:
         with:
           name: flux-build
           path: ${{ steps.compileZip.outputs.zipName }}
+
+      - name: Publish GitHub Release
+        # Only on manual dispatch: pull_request and push builds have no release tag and must
+        # not create releases. The default GITHUB_TOKEN is enough; no PAT.
+        if: success() && github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Inputs pass through the environment, never interpolated into the script body, so a
+          # crafted tag cannot inject shell.
+          TAG: ${{ inputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+          ZIP: ${{ steps.compileZip.outputs.zipName }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ZIP:-}" ] || [ ! -f "$ZIP" ]; then
+            echo "::error::No flashable zip found to publish."
+            exit 1
+          fi
+
+          NOTES="Automated Flux build from ${COMMIT}."
+
+          # Idempotent: create the release the first time, then re-upload (clobber) on re-runs
+          # of the same tag rather than failing.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; uploading asset (clobber)."
+            gh release upload "$TAG" "$ZIP" --clobber
+          else
+            FLAGS=()
+            if [ "$PRERELEASE" = "true" ]; then FLAGS+=(--prerelease); fi
+            gh release create "$TAG" "$ZIP" \
+              --title "Flux ${TAG}" \
+              --notes "$NOTES" \
+              --target "$COMMIT" \
+              "${FLAGS[@]}"
+          fi
 
       - name: Upload To Telegram
         if: env.CHAT_ID != '' && env.BOT_TOKEN != ''
