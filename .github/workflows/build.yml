@@ -44,7 +44,7 @@ jobs:
         uses: oven-sh/setup-bun@v2
 
       - name: Build Flux Daemon
-        run: ndk-build -j$(nproc --all)
+        run: ndk-build -j"$(nproc --all)"
 
       - name: Build WebUI
         working-directory: webui
@@ -73,5 +73,6 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TITLE: Flux Tweaks
         run: |
-          export VERSION=$(git rev-list --count HEAD)
+          VERSION=$(git rev-list --count HEAD)
+          export VERSION
           bash .github/scripts/telegram_bot.sh ${{ steps.compileZip.outputs.zipName }}
