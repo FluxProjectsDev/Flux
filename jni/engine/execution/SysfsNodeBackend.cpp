@@ -195,7 +195,13 @@ NodeWriteResult SysfsNodeBackend::write_checked(const std::string &path, const s
 
     NodeError error = NodeError::Ok;
     mode_t mode = 0;
-    int fd = open_node(path, O_WRONLY, error, mode);
+    // O_TRUNC, because a shorter value must replace a longer one rather than overwrite its
+    // prefix. Without it, writing "schedutil" over "performance" leaves "schedutilce" behind.
+    // Real sysfs store handlers only see this single write(2) and so are unaffected, but the
+    // backend deliberately accepts any regular file under an approved root (cgroup and procfs
+    // nodes included), and on those the leftover tail is real. This is also what the shell's
+    // `>` redirect does, so it is not a behaviour change from the legacy applier.
+    int fd = open_node(path, O_WRONLY | O_TRUNC, error, mode);
 
     if (fd < 0 && (error == NodeError::PermissionDenied)) {
         // Opening for write was refused. Reopen read-only to learn the real mode, then grant
@@ -224,7 +230,7 @@ NodeWriteResult SysfsNodeBackend::write_checked(const std::string &path, const s
         ::close(ro_fd);
         result.permission_adjusted = true;
 
-        fd = open_node(path, O_WRONLY, error, mode);
+        fd = open_node(path, O_WRONLY | O_TRUNC, error, mode);
         if (fd < 0) {
             // Could not write even after granting permission. Put the mode back before
             // leaving: a node left writable is a lasting change to the device.
@@ -289,10 +295,6 @@ NodeWriteResult SysfsNodeBackend::write_checked(const std::string &path, const s
 
     last_error_ = result.error;
     return result;
-}
-
-bool SysfsNodeBackend::write(const std::string &path, const std::string &value) {
-    return write_checked(path, value).ok();
 }
 
 } // namespace flux::execution

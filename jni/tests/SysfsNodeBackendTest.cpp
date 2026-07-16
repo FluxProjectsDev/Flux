@@ -245,3 +245,35 @@ TEST("sysfs backend: a write failure leaves the node's permissions as they were"
                   "a failed write must still restore the original mode");
     }
 }
+
+TEST("sysfs backend: a shorter value replaces a longer one, leaving no tail behind") {
+    // Regression: the write opened O_WRONLY without O_TRUNC, so writing "schedutil" (9 bytes)
+    // over "performance" (11 bytes) left "schedutilce" in the node — the new value with the tail
+    // of the old one still attached. A real sysfs store handler only ever sees the single
+    // write(2) and so hides this, but the backend accepts any regular file under an approved
+    // root, and the read-back verification that everything else depends on reads the file.
+    TempRoot root;
+    const std::string node = root.make_node("scaling_governor", "performance", 0644);
+    SysfsNodeBackend backend(root.policy());
+
+    const auto result = backend.write_checked(node, "schedutil");
+
+    CHECK(result.ok());
+    CHECK_MSG(backend.read(node).value() == "schedutil",
+              "expected exactly 'schedutil', got '" + backend.read(node).value_or("<none>") + "'");
+}
+
+TEST("sysfs backend: a shorter value also truncates when permission had to be elevated") {
+    // The same defect existed on the second open, the one taken after fchmod grants write
+    // permission — the path a read-only vendor node actually takes.
+    TempRoot root;
+    const std::string node = root.make_node("power_limit", "performance", 0444);
+    SysfsNodeBackend backend(root.policy());
+
+    const auto result = backend.write_checked(node, "0");
+
+    CHECK_MSG(result.ok(), std::string("write failed: ") + node_error_name(result.error));
+    CHECK(result.permission_adjusted);
+    CHECK_EQ(backend.read(node).value(), std::string("0"));
+    CHECK_MSG(mode_of(node) == 0444, "the exact original mode must come back");
+}

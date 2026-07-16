@@ -23,6 +23,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "DryRunPlanner.hpp"
+#include "NodeBackend.hpp"
+
 /**
  * @file ExecutionEngine.hpp
  * @brief Flux V2 Execution Engine — capability-aware, validated, verified, and
@@ -39,155 +42,119 @@
  */
 namespace flux::execution {
 
-// --- Node backend ----------------------------------------------------------
-
-/** The narrow filesystem surface the engine needs. Abstracted for host testing. */
-class NodeBackend {
-public:
-    virtual ~NodeBackend() = default;
-    virtual bool exists(const std::string &path) const = 0;
-    virtual std::optional<std::string> read(const std::string &path) const = 0;
-    virtual bool write(const std::string &path, const std::string &value) = 0;
-};
-
-/** In-memory backend: usable in tests and anywhere a real sysfs is not present. */
-class InMemoryNodeBackend : public NodeBackend {
-public:
-    void seed(const std::string &path, std::string value) { store_[path] = std::move(value); }
-    /// Force writes to a path to fail, to exercise failure/rollback paths.
-    void fail_writes_to(const std::string &path) { failing_[path] = true; }
-    void clear_failures() { failing_.clear(); }
-    /// Model a node that silently ignores one specific value: the write returns success but
-    /// the stored value does not change, so a read-back after that write does not match.
-    void ignore_value(const std::string &path, std::string value) { ignored_[path] = std::move(value); }
-    [[nodiscard]] int write_count(const std::string &path) const {
-        auto it = writes_.find(path);
-        return it == writes_.end() ? 0 : it->second;
-    }
-
-    bool exists(const std::string &path) const override { return store_.count(path) > 0; }
-    std::optional<std::string> read(const std::string &path) const override {
-        auto it = store_.find(path);
-        if (it == store_.end()) return std::nullopt;
-        return it->second;
-    }
-    bool write(const std::string &path, const std::string &value) override {
-        if (failing_.count(path)) return false;
-        ++writes_[path];
-        auto ignore = ignored_.find(path);
-        if (ignore != ignored_.end() && ignore->second == value) return true; // accepted, not stored
-        store_[path] = value;
-        return true;
-    }
-
-private:
-    std::unordered_map<std::string, std::string> store_;
-    std::unordered_map<std::string, int> writes_;
-    std::unordered_map<std::string, bool> failing_;
-    std::unordered_map<std::string, std::string> ignored_;
-};
-
-// --- Capability registry ---------------------------------------------------
-
-enum class ValueType { Token, Enum, IntRange };
-
-/** Describes one controllable device node. */
-struct NodeDescriptor {
-    std::string id;   ///< logical capability id, e.g. "cpu.policy0.scaling_governor"
-    std::string path; ///< absolute sysfs path
-    bool readable = false;
-    bool writable = false;
-    ValueType type = ValueType::Token;
-    long min = 0;                       ///< IntRange lower bound (inclusive)
-    long max = 0;                       ///< IntRange upper bound (inclusive)
-    std::vector<std::string> allowed;   ///< Enum/Token allowlist (empty Token == any non-empty)
-    bool critical = false;              ///< a failed apply here is a critical failure
-    int order_group = 0;                ///< deterministic apply ordering
-    std::string source = "generic";     ///< device-config provenance label
-};
-
-/** Registry of nodes actually present/usable on this device. */
-class CapabilityRegistry {
-public:
-    /// Probe @p descriptor against @p backend; it becomes supported only if the path exists
-    /// (and, when it must be written, is marked writable). A similarly-named path is not
-    /// assumed valid just because it exists — writability is required for a write target.
-    void register_node(NodeDescriptor descriptor, const NodeBackend &backend);
-
-    [[nodiscard]] const NodeDescriptor *find(const std::string &id) const;
-    [[nodiscard]] bool supported(const std::string &id) const;
-    [[nodiscard]] std::vector<std::string> unsupported_ids() const;
-    [[nodiscard]] size_t size() const { return descriptors_.size(); }
-
-private:
-    std::vector<NodeDescriptor> descriptors_;
-    std::unordered_map<std::string, size_t> index_;
-    std::unordered_map<std::string, bool> supported_;
-};
-
-// --- Validation ------------------------------------------------------------
-
-enum class ValidationError {
-    Ok,
-    UnsafePath,
-    UnsupportedCapability,
-    NotWritable,
-    TypeMismatch,
-    OutOfRange,
-    NotInAllowlist,
-};
-
-const char *validation_error_name(ValidationError error);
-
-class ValueValidator {
-public:
-    /// Reject empty, relative, traversal ("..") and NUL-bearing paths.
-    static ValidationError validate_path(const std::string &path);
-    static ValidationError validate_value(const NodeDescriptor &descriptor, const std::string &value);
-};
-
 // --- Plan ------------------------------------------------------------------
+//
+// There is exactly one planner in Flux: intents resolve against probed descriptors in
+// DryRunPlanner, and the result is *compiled* here into the live plan. This file used to carry
+// a second, independent model — CapabilityRegistry/NodeDescriptor/ExecutionPlanner, which
+// planned from a ProfilePlanSpec against a path-exists check. Keeping both would have meant two
+// answers to "can this device do this", and the one that wrote would not have been the one the
+// tests, the dry run and the UI had inspected. It was never wired to the daemon; the descriptor
+// model replaces it.
 
+/** One fully specified, validated write. Compiled from a DryRunAction, never authored here. */
 struct ExecutionAction {
+    std::string action_id;
     std::string capability_id;
+    std::string descriptor_id;
+    std::string descriptor_set;
+
     std::string path;
     std::string desired_value;
+    NodeValueType value_type = NodeValueType::Token;
+
+    /// The value to put back. nullopt means the original could not be read, which makes any
+    /// rollback of this action impossible — the engine must not invent one.
     std::optional<std::string> previous_value;
+    bool rollback_required = false;
+
+    ReadBackStrategy read_back = ReadBackStrategy::Exact;
+    RollbackStrategy rollback = RollbackStrategy::RestoreOriginal;
+
     int order_group = 0;
+    std::string conflict_group;
+    std::string dependency_group;
+    std::vector<std::string> depends_on;
     bool critical = false;
+
     std::string reason;
+    std::string source_intent_id;
 };
 
-/** A request to move to a profile: the desired value per capability. */
-struct ProfilePlanSpec {
-    struct Item {
-        std::string capability_id;
-        std::string desired_value;
-        std::string reason;
-    };
-    std::vector<Item> items;
+/** Why a compiled plan may not be executed. */
+enum class PlanRejection {
+    None,
+    NotExecutable,          ///< the dry run itself produced no valid plan
+    CapabilityNotSupported, ///< an action's capability is not Supported
+    UnsafePath,
+    ConflictingTargets,     ///< two actions want different values on one node
+    InvalidValue,
+    MissingDependency,
+    DependencyCycle,
+    UnsupportedVerification,
+    RollbackImpossible,     ///< rollback is required and the original is unknown
+    CapabilityGenerationChanged, ///< the device changed between planning and applying
 };
 
-/** An immutable, inspectable, fully-validated plan. */
+const char *plan_rejection_name(PlanRejection rejection);
+
+/**
+ * @brief An immutable, fully-validated, executable plan.
+ *
+ * Compiled from a DryRunExecutionPlan. It carries the requested and the effective intent
+ * separately: what was asked for is not what the device could do, and collapsing the two is how
+ * a constrained apply gets reported as a full one.
+ */
 struct ExecutionPlan {
+    std::string plan_id;
+    uint64_t capability_generation = 0; ///< the device state this plan was compiled against
+
+    PolicyIntent requested_intent;
+    std::string effective_intent_id;
+    flux::engine::TargetProfile requested_profile = flux::engine::TargetProfile::Balanced;
+
     std::vector<ExecutionAction> actions;
+    std::vector<PreventedAction> prevented;
+
     int skipped_unsupported = 0;
+    bool critical_rejection = false;
+    ExecutionReadiness readiness = ExecutionReadiness::Unsupported;
+
     bool valid = false;
+    PlanRejection rejection = PlanRejection::None;
     std::string invalid_reason;
+
+    [[nodiscard]] bool empty() const { return actions.empty(); }
+    [[nodiscard]] size_t action_count() const { return actions.size(); }
 };
 
-class ExecutionPlanner {
+/**
+ * @brief Compiles a validated dry-run plan into an executable one. Adds no planning decisions.
+ *
+ * The compiler re-validates rather than trusting: a plan is a projection of a device state that
+ * may have changed since. It refuses, it never repairs — a plan that cannot be executed exactly
+ * as inspected is not silently reduced to one that can.
+ */
+class LivePlanCompiler {
 public:
-    /// Build a validated plan. Unsupported capabilities are skipped (counted, not fatal);
-    /// unsafe paths, invalid values, and conflicting duplicate actions make the whole plan
-    /// invalid so nothing is applied.
-    [[nodiscard]] ExecutionPlan plan(const ProfilePlanSpec &spec, const CapabilityRegistry &registry,
-                                     const NodeBackend &backend) const;
+    /**
+     * @brief Compile @p dry_run into an executable plan.
+     *
+     * @param policy the same approved roots the backend and the probe used. Injected, never
+     *        assumed: a compiler that re-checked against its own idea of the roots would
+     *        approve targets the backend then refuses, or worse, the reverse.
+     * @param capability_generation the generation the dry run was planned against; the engine
+     *        re-checks it at apply time to catch a device that changed underneath the plan.
+     */
+    [[nodiscard]] static ExecutionPlan compile(const DryRunExecutionPlan &dry_run,
+                                               const NodeBackend &backend, const PathPolicy &policy,
+                                               uint64_t capability_generation);
 };
 
 // --- Apply -----------------------------------------------------------------
 
 struct ApplyResult {
+    std::string plan_id;
     std::string requested_profile;
     std::string previous_profile;
     std::string reason;
@@ -197,36 +164,70 @@ struct ApplyResult {
     int skipped_unsupported = 0;
     int skipped_idempotent = 0;
     int optional_failures = 0;
+    int prevented_count = 0;
     bool critical_failure = false;
+
+    bool plan_rejected = false;
+    PlanRejection rejection = PlanRejection::None;
 
     bool rollback_attempted = false;
     bool rollback_succeeded = false;
+    bool rollback_unavailable = false; ///< a rollback was needed and no original was known
 
-    bool verified_active = false; ///< every critical action verified to hold its desired value
-    bool degraded = false;        ///< rollback failed: runtime is in an uncertain state
+    /// Every critical action verified to hold its desired value. This — and only this — is what
+    /// lets a caller advance the verified profile.
+    bool verified_active = false;
+    bool degraded = false; ///< rollback failed: the runtime is in a state nobody designed
     std::string degraded_capability;
+
+    /// The worst error category seen, sanitized: a category and a capability id, never a path
+    /// or an errno string. History is destined for a diagnostics channel a user can export.
+    NodeError worst_error = NodeError::Ok;
 
     int64_t timestamp_ms = 0;
     std::string message;
 };
 
-/** One bounded history entry, the future backend for Flux Console Diagnostics. */
+/**
+ * @brief One bounded history record.
+ *
+ * Everything a user or a maintainer needs to answer "why is my device in this state" without
+ * reproducing it. Sized and bounded: this is a ring buffer in memory, not a log on disk.
+ */
 struct ApplyHistoryEntry {
     int64_t monotonic_ms = 0;
     uint64_t telemetry_sequence = 0;
-    std::string previous_profile;
+    std::string plan_id;
+
+    std::string previous_verified_profile;
     std::string requested_profile;
+    std::string effective_profile;
     std::string reason;
     int priority = 0;
-    std::string health;
-    bool verified_active = false;
+    std::string telemetry_health;
+    std::string capability_health;
+
+    int action_count = 0;
+    int succeeded = 0;
+    int prevented_count = 0;
+    int optional_failures = 0;
     bool critical_failure = false;
+
+    bool rollback_attempted = false;
+    bool rollback_succeeded = false;
+
+    bool verified_active = false;
     bool degraded = false;
-    std::string error_summary;
+
+    /// A category, never a raw errno or a device path.
+    std::string error_category;
 };
 
 /**
- * @brief Applies plans transactionally, with verification, rollback and idempotency.
+ * @brief Applies compiled plans transactionally, with verification, rollback and idempotency.
+ *
+ * The engine is the only thing in Flux that writes a device node, and it writes only what a
+ * plan told it to. It selects no profiles, reads no telemetry, and knows about no SoC.
  */
 class ExecutionEngine {
 public:
@@ -234,16 +235,17 @@ public:
         : backend_(backend), history_capacity_(history_capacity) {}
 
     /**
-     * @brief Apply @p plan, moving from @p previous_profile to @p requested_profile.
+     * @brief Apply @p plan, moving from @p previous_profile to the plan's requested profile.
      *
-     * Sequence: validate -> capture previous (and first-seen originals) -> apply in order ->
-     * verify critical writes -> on critical failure roll back the critical group -> publish a
-     * complete ApplyResult. The active profile is the caller's to advance only when
-     * verified_active is true and there was no critical failure.
+     * Sequence per critical group: re-validate the plan against the live capability generation
+     * -> capture originals -> compute the diff from verified state -> apply in order -> read
+     * back and verify -> roll the group back on critical failure -> publish a complete
+     * ApplyResult. No critical write happens until the whole group has passed preflight.
+     *
+     * The caller advances the verified profile only when verified_active is true.
      */
-    ApplyResult apply(const ExecutionPlan &plan, const std::string &requested_profile,
-                      const std::string &previous_profile, const std::string &reason,
-                      int64_t now_ms);
+    ApplyResult apply(const ExecutionPlan &plan, const std::string &previous_profile,
+                      uint64_t live_capability_generation, int64_t now_ms);
 
     /** Restore every first-seen original value (session end, shutdown, etc.). */
     ApplyResult restore_originals(const std::string &reason, int64_t now_ms);
@@ -253,8 +255,14 @@ public:
     void invalidate_all() { verified_.clear(); }
     void invalidate(const std::string &capability_id) { verified_.erase(capability_id); }
 
+    /// Re-read every capability whose value Flux believes it verified, and forget the ones the
+    /// device no longer agrees with. This is how external mutation stops being invisible.
+    /// @return the capability ids that had drifted.
+    std::vector<std::string> detect_external_mutation();
+
     [[nodiscard]] const std::deque<ApplyHistoryEntry> &history() const { return history_; }
     [[nodiscard]] std::optional<std::string> verified_value(const std::string &id) const;
+    [[nodiscard]] size_t tracked_originals() const { return originals_.size(); }
 
 private:
     NodeBackend &backend_;
@@ -267,11 +275,13 @@ private:
 
     std::unordered_map<std::string, std::string> verified_; ///< last verified value per capability
     std::unordered_map<std::string, Original> originals_;    ///< first-seen value per capability
+    std::unordered_map<std::string, std::string> verified_paths_;
 
     std::deque<ApplyHistoryEntry> history_;
 
-    void record_history(const ApplyResult &result);
-    void capture_original(const std::string &id, const std::string &path);
+    void record_history(const ApplyResult &result, const ExecutionPlan &plan);
+    bool capture_original(const std::string &id, const std::string &path);
+    [[nodiscard]] bool value_holds(const ExecutionAction &action) const;
 };
 
 } // namespace flux::execution

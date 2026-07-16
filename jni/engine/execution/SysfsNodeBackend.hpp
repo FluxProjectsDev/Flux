@@ -22,7 +22,7 @@
 #include <sys/types.h>
 #include <vector>
 
-#include "ExecutionEngine.hpp"
+#include "NodeBackend.hpp"
 
 /**
  * @file SysfsNodeBackend.hpp
@@ -66,58 +66,10 @@
  */
 namespace flux::execution {
 
-/** Why a node operation ended the way it did. Never collapse these into a bool. */
-enum class NodeError {
-    Ok,
-    PathNotAllowed,      ///< outside every approved root, or traversal/NUL-bearing
-    NotFound,            ///< ENOENT
-    NotRegularFile,      ///< a directory, device node, socket...
-    SymlinkRejected,     ///< O_NOFOLLOW tripped, or lstat says symlink
-    PermissionDenied,    ///< EACCES/EPERM, and permission could not be granted safely
-    ReadOnlyFilesystem,  ///< EROFS
-    WriteFailed,         ///< the write(2) itself failed or was short
-    VerifyMismatch,      ///< write reported success but the node did not take the value
-    ModeRestoreFailed,   ///< the value was written but the original mode could not be restored
-};
+// NodeError, NodeWriteResult and the NodeBackend contract live in NodeBackend.hpp: the engine
+// depends on the contract and must not depend on the real filesystem, and this backend must not
+// have to know what a plan is.
 
-const char *node_error_name(NodeError error);
-
-/** The outcome of one node write, including whether permissions had to be changed. */
-struct NodeWriteResult {
-    NodeError error = NodeError::Ok;
-    bool permission_adjusted = false; ///< write permission was temporarily granted
-    bool mode_restored = true;        ///< the original mode was put back
-    mode_t original_mode = 0;         ///< the mode actually observed, never assumed
-    int errno_value = 0;
-
-    [[nodiscard]] bool ok() const { return error == NodeError::Ok; }
-};
-
-/**
- * @brief Roots under which Flux is willing to write.
- *
- * An allowlist, not a denylist: a descriptor cannot reach the rest of the filesystem by being
- * wrong or by being crafted. Everything Flux tunes is a kernel virtual file, so the roots are
- * narrow by nature and there is no legitimate reason to widen them to a real filesystem.
- */
-class PathPolicy {
-public:
-    /// The default approved roots. Deliberately excludes /data, /system, /vendor and anything
-    /// else that is a real filesystem holding real files.
-    static const std::vector<std::string> &default_roots();
-
-    explicit PathPolicy(std::vector<std::string> roots = default_roots())
-        : roots_(std::move(roots)) {}
-
-    /// Reject empty, relative, NUL-bearing, traversal-bearing paths and anything outside the
-    /// approved roots. Purely lexical: it runs before the filesystem is touched at all.
-    [[nodiscard]] NodeError check(const std::string &path) const;
-
-    [[nodiscard]] const std::vector<std::string> &roots() const { return roots_; }
-
-private:
-    std::vector<std::string> roots_;
-};
 
 /**
  * @brief The production NodeBackend. The only component in Flux that writes a device node.
@@ -132,13 +84,9 @@ public:
     [[nodiscard]] bool exists(const std::string &path) const override;
     [[nodiscard]] std::optional<std::string> read(const std::string &path) const override;
 
-    /// Convenience for the NodeBackend contract. Prefer write_checked(): a bare bool cannot
-    /// distinguish "read-only filesystem" from "node ignored the value", and the difference
-    /// decides whether a capability is unavailable or a write simply failed.
-    bool write(const std::string &path, const std::string &value) override;
-
     /// The full-fidelity write: permission handling, exact mode restoration, real errno.
-    NodeWriteResult write_checked(const std::string &path, const std::string &value);
+    /// This is the engine's entry point; NodeBackend::write() is the bool convenience over it.
+    NodeWriteResult write_checked(const std::string &path, const std::string &value) override;
 
     /// Can this node be written, either already or by safely adding one permission bit?
     /// Answers without writing, for capability probing.

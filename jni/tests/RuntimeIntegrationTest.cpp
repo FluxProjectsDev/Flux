@@ -27,12 +27,15 @@
 #include "TelemetryStore.hpp"
 
 #include "DecisionEngine.hpp"
+#include "DevicePacks.hpp"
 #include "ExecutionEngine.hpp"
+#include "PolicyIntent.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -253,44 +256,71 @@ TEST("ingestor: absent content keeps the last snapshot and ages its health") {
 
 namespace {
 
-// A minimal device profile mapping for the integration flow.
-exe::ProfilePlanSpec spec_for(eng::TargetProfile p) {
-    std::string gov;
-    switch (p) {
-        case eng::TargetProfile::Performance: gov = "performance"; break;
-        case eng::TargetProfile::PerformanceLite: gov = "schedutil"; break;
-        case eng::TargetProfile::Balanced: gov = "schedutil"; break;
-        case eng::TargetProfile::PowerSave: gov = "powersave"; break;
+/// A real on-disk tree with the generic pack's cpufreq nodes, so the probe, the backend and the
+/// engine all see a genuine filesystem rather than a mock's idea of one.
+class TempTree {
+public:
+    TempTree() {
+        char tmpl[] = "/tmp/flux_runtime_XXXXXX";
+        const char *dir = mkdtemp(tmpl);
+        root_ = dir ? dir : "";
+        for (int policy : {0, 4, 7}) {
+            node("/sys/devices/system/cpu/cpufreq/policy" + std::to_string(policy) +
+                 "/scaling_governor");
+        }
     }
-    return exe::ProfilePlanSpec{{{"cpu.governor", gov, eng::target_profile_name(p)}}};
+    ~TempTree() {
+        if (!root_.empty()) std::filesystem::remove_all(root_);
+    }
+    TempTree(const TempTree &) = delete;
+    TempTree &operator=(const TempTree &) = delete;
+
+    [[nodiscard]] std::string rebase(const std::string &absolute) const { return root_ + absolute; }
+    [[nodiscard]] exe::PathPolicy policy() const {
+        return exe::PathPolicy(std::vector<std::string>{root_ + "/"});
+    }
+    [[nodiscard]] std::string governor_path() const {
+        return rebase("/sys/devices/system/cpu/cpufreq/policy0/scaling_governor");
+    }
+
+private:
+    void node(const std::string &relative) {
+        const std::string full = root_ + relative;
+        std::filesystem::create_directories(std::filesystem::path(full).parent_path());
+        std::ofstream out(full);
+        out << "schedutil";
+    }
+    std::string root_;
+};
+
+/// The generic pack, rebased onto the temp tree and promoted as if hardware validation had
+/// happened. Vendor packs stay out: they are gated, and the whole point of the generic fallback
+/// is that it works without them.
+exe::DevicePack generic_pack_on(const TempTree &tree) {
+    exe::DevicePack pack = flux::device::generic_pack();
+    for (auto &d : pack.descriptors) {
+        d.path = tree.rebase(d.path);
+        d.validation = exe::ValidationStatus::PhysicalDeviceValidated;
+    }
+    return pack;
 }
 
-exe::NodeDescriptor governor() {
-    exe::NodeDescriptor d;
-    d.id = "cpu.governor";
-    d.path = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor";
-    d.readable = d.writable = true;
-    d.type = exe::ValueType::Enum;
-    d.allowed = {"performance", "schedutil", "powersave"};
-    d.critical = true;
-    return d;
-}
-
-// Drive raw content through ingestor->store->assembler->engine->planner->executor.
+// Drive raw content through ingestor -> store -> assembler -> decision -> intent -> plan ->
+// compile -> apply: the daemon's own composition.
 struct Runtime {
+    TempTree tree;
     tel::TelemetryStore store;
     tel::TelemetryIngestor ingestor{store};
     tel::RuntimeSnapshotAssembler assembler;
     eng::DecisionEngine engine;
     eng::EngineState state;
-    exe::InMemoryNodeBackend backend;
-    exe::CapabilityRegistry registry;
-    exe::ExecutionPlanner planner;
+    exe::SysfsNodeBackend backend{tree.policy()};
+    exe::CapabilityProbe probe{backend, tree.policy()};
+    exe::DryRunPlanner planner{probe};
     exe::ExecutionEngine executor{backend};
+    uint64_t generation = 1;
 
     Runtime() {
-        backend.seed(governor().path, "schedutil");
-        registry.register_node(governor(), backend);
         state.current = eng::TargetProfile::Balanced;
         state.prev_health = eng::DataHealth::Healthy; // avoid restore-settle in these steady tests
         state.prev_in_session = true;
@@ -301,7 +331,7 @@ struct Runtime {
         return evaluate(now);
     }
 
-    // Evaluate against the currently-published telemetry (no new ingest).
+    /// Evaluate against the currently-published telemetry (no new ingest).
     exe::ApplyResult evaluate(int64_t now) {
         auto pub = store.get();
         auto assembled = assembler.assemble(pub->snapshot, pub->health,
@@ -312,12 +342,19 @@ struct Runtime {
         in.capabilities = assembled.capabilities;
         in.session.in_session = assembled.foreground.info.present;
         in.session.package = assembled.foreground.info.package;
-        eng::Decision d = engine.evaluate(in, state, now);
+
+        const eng::Decision d = engine.evaluate(in, state, now);
         state = d.next_state;
-        exe::ExecutionPlan plan = planner.plan(spec_for(d.desired_profile), registry, backend);
-        return executor.apply(plan, eng::target_profile_name(d.desired_profile),
-                              eng::target_profile_name(state.current), eng::decision_reason_name(d.reason),
-                              now);
+
+        const auto intents = exe::IntentMapper::from_decision(d);
+        const auto dry = planner.plan(intents, {generic_pack_on(tree)},
+                                      {exe::SocFamily::Generic, "fake"}, state.current, now);
+        const auto plan = exe::LivePlanCompiler::compile(dry, backend, tree.policy(), generation);
+        return executor.apply(plan, eng::target_profile_name(state.current), generation, now);
+    }
+
+    [[nodiscard]] std::string governor() const {
+        return backend.read(tree.governor_path()).value_or("<unreadable>");
     }
 
     // Cool game to steady Performance: telemetry needs 2 samples to be Healthy, the engine
@@ -335,15 +372,16 @@ TEST("integration: a cool game session drives a verified Performance apply") {
     Runtime rt;
     rt.warm_to_performance();
     CHECK(rt.state.current == eng::TargetProfile::Performance);
-    CHECK_EQ(rt.backend.read(governor().path).value(), std::string("performance"));
+    CHECK_MSG(rt.governor() == "performance",
+              "the live path must reach the device, got: " + rt.governor());
 }
 
 TEST("integration: a thermal emergency drives a safe apply regardless of session") {
     Runtime rt;
     rt.warm_to_performance();
     exe::ApplyResult r = rt.step(valid_wire(4, 1.30f, 4, false, true, "com.g"), 300); // emergency
-    CHECK(r.verified_active);
-    CHECK_EQ(rt.backend.read(governor().path).value(), std::string("schedutil")); // Balanced
+    CHECK_MSG(r.verified_active, "a safety downgrade must be applied and verified: " + r.message);
+    CHECK_EQ(rt.governor(), std::string("schedutil")); // Balanced
 }
 
 TEST("integration: stale telemetry never promotes performance") {
@@ -355,15 +393,33 @@ TEST("integration: stale telemetry never promotes performance") {
     exe::ApplyResult r = rt.evaluate(6000);
     CHECK(rt.store.get()->health == tel::TelemetryHealth::Stale);
     CHECK(rt.state.current != eng::TargetProfile::Performance);
-    CHECK_EQ(rt.backend.read(governor().path).value(), std::string("schedutil"));
+    CHECK_EQ(rt.governor(), std::string("schedutil"));
     (void)r;
 }
 
 TEST("integration: repeating the same decision performs no extra writes") {
     Runtime rt;
     rt.warm_to_performance();
-    const int writes = rt.backend.write_count(governor().path);
+    const std::string settled = rt.governor();
+
     exe::ApplyResult again = rt.step(valid_wire(4, 0.30f, 0, false, true, "com.g"), 300);
-    CHECK_EQ(again.skipped_idempotent, 1);
-    CHECK_EQ(rt.backend.write_count(governor().path), writes); // unchanged
+
+    CHECK_MSG(again.skipped_idempotent == 3,
+              "all three cpufreq policies were already verified in place, got " +
+                  std::to_string(again.skipped_idempotent));
+    CHECK_EQ(again.succeeded, 0);
+    CHECK_EQ(rt.governor(), settled);
+}
+
+TEST("integration: the live path is the only writer, and it writes only through the engine") {
+    // The cutover property, from the outside: a decision produces device state only by way of
+    // an intent, a plan and a verified apply. Nothing in this chain shells out.
+    Runtime rt;
+    rt.warm_to_performance();
+
+    const auto &history = rt.executor.history();
+    CHECK_MSG(!history.empty(), "the engine must have recorded the applies it performed");
+    CHECK_MSG(history.back().verified_active,
+              "the settled profile must be verified, not merely requested");
+    CHECK_EQ(history.back().requested_profile, std::string("performance"));
 }
