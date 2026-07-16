@@ -48,7 +48,6 @@
 #include <PIDTracker.hpp>
 #include <ShellUtility.hpp>
 #include <SignalHandler.hpp>
-#include <SynthesisCore.hpp>
 
 // ---------------------------------------------------------------------------
 // Global registry
