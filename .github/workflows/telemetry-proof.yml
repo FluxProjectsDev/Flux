@@ -87,6 +87,15 @@ jobs:
       - name: Prove V2 telemetry link and symbols
         run: bash .github/scripts/verify-native-telemetry.sh
 
+      # The cutover proof: the V2 execution engine is what writes, and the legacy shell applier
+      # cannot be invoked. Checks the built binary's symbols, imports and strings — a source
+      # search cannot tell a live call from a mention in a comment.
+      - name: Prove V2 live execution and legacy deactivation (arm64-v8a)
+        run: bash .github/scripts/verify-live-execution.sh arm64-v8a
+
+      - name: Prove V2 live execution and legacy deactivation (armeabi-v7a)
+        run: bash .github/scripts/verify-live-execution.sh armeabi-v7a
+
       # Build the WebUI so the package under validation is the package that ships, not a
       # stripped-down approximation of it.
       - name: Build WebUI

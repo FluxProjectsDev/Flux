@@ -39,13 +39,6 @@ using TelemetryProvider = std::function<std::optional<flux::telemetry::RawSnapsh
 /** Install the provider. Called once by the daemon at startup. */
 void set_telemetry_provider(TelemetryProvider provider);
 
-/**
- * @brief Sets all environment variables for the profiler
- */
-void set_profiler_env_vars();
-
-void run_perfcommon(void);
-void apply_performance_profile(bool lite_mode, std::string game_pkg, pid_t game_pid);
-void apply_performance_lite_profile(std::string game_pkg, pid_t game_pid);
-void apply_balance_profile();
-void apply_powersave_profile();
+// The profile-apply entry points that used to be declared here are gone. Profile application is
+// flux::execution::ExecutionRuntime's job, and it is the only one: there is no shell dispatcher
+// left for a caller to reach for. See docs/execution-engine-migration.md.
