@@ -110,9 +110,32 @@ jobs:
         run: bash .github/scripts/compile_zip.sh
 
       - name: Validate flashable package
+        id: validatePackage
         env:
           ZIP: ${{ steps.compileZip.outputs.zipName }}
         run: bash .github/scripts/verify-package.sh "$ZIP"
+
+      - name: Prove Stage 2 release readiness (inventory, module.prop, secrets)
+        id: releaseReadiness
+        env:
+          ZIP: ${{ steps.compileZip.outputs.zipName }}
+          INVENTORY_OUT: package-inventory.tsv
+        run: bash .github/scripts/verify-release-readiness.sh "$ZIP"
+
+      - name: Prove module lifecycle (install / upgrade / uninstall)
+        id: lifecycle
+        run: bash .github/scripts/verify-lifecycle.sh
+
+      # The aggregate. It does not check that other jobs *exist* — it re-asserts, in one place,
+      # the specific guarantees whose individual steps must all have run in *this* job to reach
+      # here, and it writes the summary a reviewer reads to decide the PR is ready. Because it is
+      # the last step of a job whose earlier steps fail the run on any violation, it cannot be
+      # reached while any guarantee is unproven: there is no path to this step that skips them.
+      - name: Stage 2 aggregate proof
+        run: |
+          bash .github/scripts/verify-stage2-aggregate.sh
+        env:
+          INVENTORY: package-inventory.tsv
 
       # Kept for inspection when a proof fails. This is an Actions artifact for humans, not a
       # release: nothing here uploads to a tag or a release.
@@ -124,5 +147,6 @@ jobs:
           path: |
             obj/local/*/fluxd
             libs/*/fluxd
+            package-inventory.tsv
           retention-days: 7
           if-no-files-found: warn
