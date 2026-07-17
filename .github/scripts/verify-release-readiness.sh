@@ -67,7 +67,7 @@ printf 'path\ttype\tsize\tmode\tsha256\towner\tclass\n' >"${INVENTORY}"
 
 classify_owner() {
 	case "$1" in
-	system/bin/fluxd) printf 'flux-daemon (V2 runtime)' ;;
+	libs/*/fluxd) printf 'flux-daemon (V2 runtime)' ;;
 	system/bin/flux_utility) printf 'flux-utility (diagnostics)' ;;
 	synthesiscore.apk) printf 'SynthesisCore (telemetry provider)' ;;
 	webroot/*) printf 'WebUI' ;;
@@ -83,8 +83,8 @@ classify_owner() {
 
 classify_requirement() {
 	case "$1" in
-	system/bin/fluxd | module.prop | customize.sh | uninstall.sh | service.sh) printf 'required' ;;
-	synthesiscore.apk | webroot/index.html) printf 'required' ;;
+	libs/*/fluxd | module.prop | customize.sh | uninstall.sh | service.sh) printf 'required' ;;
+	system/bin/flux_utility | synthesiscore.apk | webroot/index.html) printf 'required' ;;
 	LICENSE | NOTICE.md) printf 'required (licensing)' ;;
 	*) printf 'optional' ;;
 	esac
@@ -206,6 +206,7 @@ SECRET_PATTERNS=(
 	'-----BEGIN [A-Z ]*PRIVATE KEY-----'
 	'AKIA[0-9A-Z]{16}' # AWS access key id
 )
+SECRETS_BEFORE="${FAILURES}"
 for pattern in "${SECRET_PATTERNS[@]}"; do
 	if grep -rIlaE "${pattern}" "${WORK}/pkg" >/dev/null 2>&1; then
 		# Deliberately does not echo the match: printing a leaked secret into a public CI log is
@@ -213,7 +214,7 @@ for pattern in "${SECRET_PATTERNS[@]}"; do
 		fail "the package contains something matching a credential pattern (${pattern%%[[]*}...)"
 	fi
 done
-green "  no credential-shaped content in the package"
+[ "${FAILURES}" -eq "${SECRETS_BEFORE}" ] && green "  no credential-shaped content in the package"
 
 # Signing material must never be packaged.
 while IFS= read -r found; do
@@ -256,7 +257,21 @@ fi
 
 # ── 5. Required present, legacy absent ───────────────────────────────────────
 head2 "5. Contents"
-for required in module.prop customize.sh uninstall.sh service.sh system/bin/fluxd \
+# The daemon ships under libs/<abi>/ and customize.sh copies it into system/bin at install time,
+# so the ZIP contains libs/<abi>/fluxd, not system/bin/fluxd. Check where it actually is.
+ABIS="${ABIS:-$(sed -n 's/^APP_ABI[[:space:]]*:=[[:space:]]*//p' jni/Application.mk)}"
+for abi in ${ABIS}; do
+	exe="${WORK}/pkg/libs/${abi}/fluxd"
+	if [ ! -f "${exe}" ]; then
+		fail "missing required artifact: libs/${abi}/fluxd"
+	elif ! file -b "${exe}" | grep -q 'ELF'; then
+		fail "libs/${abi}/fluxd is not an ELF binary"
+	else
+		green "  present: libs/${abi}/fluxd ($(file -b "${exe}" | cut -d, -f1-2))"
+	fi
+done
+
+for required in module.prop customize.sh uninstall.sh service.sh \
 	system/bin/flux_utility synthesiscore.apk webroot/index.html LICENSE NOTICE.md; do
 	if [ -f "${WORK}/pkg/${required}" ]; then
 		green "  present: ${required}"
@@ -265,21 +280,13 @@ for required in module.prop customize.sh uninstall.sh service.sh system/bin/flux
 	fi
 done
 
+LEGACY_BEFORE="${FAILURES}"
 for legacy in system/bin/flux_profiler flux_profiler.sh Profiler.cpp Profiler.hpp; do
 	if [ -e "${WORK}/pkg/${legacy}" ]; then
 		fail "the package ships a removed legacy artifact: ${legacy}"
 	fi
 done
-green "  no removed legacy artifact in the package"
-
-# fluxd must be the real thing for the packaged ABI, not a placeholder.
-if [ -f "${WORK}/pkg/system/bin/fluxd" ]; then
-	if ! file -b "${WORK}/pkg/system/bin/fluxd" | grep -q 'ELF'; then
-		fail "system/bin/fluxd is not an ELF binary"
-	else
-		green "  fluxd: $(file -b "${WORK}/pkg/system/bin/fluxd" | cut -d, -f1-2)"
-	fi
-fi
+[ "${FAILURES}" -eq "${LEGACY_BEFORE}" ] && green "  no removed legacy artifact in the package"
 
 head2 "═══ Result ═══"
 if [ "${FAILURES}" -ne 0 ]; then

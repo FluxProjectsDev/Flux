@@ -74,10 +74,11 @@ else
 	ENTRIES="$(($(wc -l <"${INVENTORY}") - 1))"
 	# The daemon must be in the inventory. If it is not, the package validated is not a package
 	# that ships Flux.
-	if grep -qF "system/bin/fluxd" "${INVENTORY}"; then
-		green "  inventory has ${ENTRIES} entries and includes fluxd"
+	# The daemon ships at libs/<abi>/fluxd in the ZIP (customize.sh installs it into system/bin).
+	if grep -qE "libs/.*/fluxd" "${INVENTORY}"; then
+		green "  inventory has ${ENTRIES} entries and includes the daemon"
 	else
-		fail "the inventory does not list fluxd"
+		fail "the inventory does not list the fluxd daemon"
 	fi
 	# The legacy applier must not be.
 	if grep -qE "(^|/)flux_profiler" "${INVENTORY}"; then
