@@ -101,6 +101,9 @@ DevicePack generic_pack() {
             {kIntentSustainedPerformance, "performance"},
             {kIntentConstrainedPerformance, "schedutil"},
             {kIntentBalanced, "schedutil"},
+            // Power save asks for a slower phone on purpose; safe is a thermal fallback that
+            // wants the kernel's own balanced behaviour back, not a power floor.
+            {kIntentPowerSave, "powersave"},
             {kIntentSafe, "schedutil"},
         };
         d.read_back = ReadBackStrategy::Exact;

@@ -76,6 +76,7 @@ SOURCES=(
     "${SCRIPT_DIR}/TelemetryPipelineTest.cpp"
     "${SCRIPT_DIR}/ExecutionEngineTest.cpp"
     "${SCRIPT_DIR}/ExecutionRuntimeTest.cpp"
+    "${SCRIPT_DIR}/RuntimeTuningTest.cpp"
     "${SCRIPT_DIR}/ZenControllerTest.cpp"
     "${SCRIPT_DIR}/SysfsNodeBackendTest.cpp"
     "${SCRIPT_DIR}/DeviceDescriptorTest.cpp"
@@ -104,6 +105,7 @@ SOURCES=(
     "${JNI_DIR}/engine/execution/PolicyIntent.cpp"
     "${JNI_DIR}/engine/execution/DryRunPlanner.cpp"
     "${JNI_DIR}/engine/execution/RuntimeProfileState.cpp"
+    "${JNI_DIR}/engine/execution/RuntimeTuning.cpp"
     "${JNI_DIR}/engine/execution/ExecutionRuntime.cpp"
 )
 

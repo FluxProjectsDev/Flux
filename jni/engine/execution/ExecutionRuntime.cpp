@@ -26,7 +26,8 @@ using flux::engine::DecisionPriority;
 ExecutionRuntime::ExecutionRuntime(std::vector<DevicePack> packs, DeviceIdentity identity,
                                    PathPolicy policy, ZenBackend *zen, size_t history_capacity)
     : policy_(std::move(policy)),
-      packs_(std::move(packs)),
+      base_packs_(std::move(packs)),
+      packs_(base_packs_),
       identity_(std::move(identity)),
       backend_(policy_),
       probe_(backend_, policy_),
@@ -37,6 +38,29 @@ ExecutionRuntime::ExecutionRuntime(std::vector<DevicePack> packs, DeviceIdentity
 
 void ExecutionRuntime::shutdown() {
     shut_down_ = true;
+}
+
+void ExecutionRuntime::set_tuning(RuntimeTuning tuning, int64_t now_ms) {
+    const bool was_enabled = tuning_.tweaks_enabled;
+    tuning_ = std::move(tuning);
+
+    // Re-derive from the packs as supplied, never from the already-tuned copy: applying a
+    // suppression to an already-suppressed set would make each change permanent, so a user who
+    // turned a mitigation off could never turn it back on without restarting the daemon.
+    packs_ = apply_tuning(base_packs_, tuning_);
+
+    ++capability_generation_;
+    engine_.invalidate_all();
+    have_last_intent_ = false;
+
+    // Turning tweaks off is not "stop changing things", it is "put my device back". Restoring
+    // here rather than on the next cycle means the user sees the effect when they flip the
+    // switch, not whenever the next policy transition happens to fire.
+    if (was_enabled && !tuning_.tweaks_enabled && !shut_down_) {
+        const auto restored = engine_.restore_originals("tweaks_disabled", now_ms);
+        state_.record_restore(restored, now_ms);
+    }
+    publish();
 }
 
 void ExecutionRuntime::invalidate_capabilities(const std::string &reason) {
@@ -84,6 +108,13 @@ RuntimeCycleResult ExecutionRuntime::on_decision(const Decision &decision,
                                                  const SessionContext &session, int64_t now_ms) {
     RuntimeCycleResult out;
     if (shut_down_) return out; // no write may happen once shutdown has begun
+
+    // The user's master switch. Checked before anything else is computed: there is no plan to
+    // build, and nothing about the device to ask, if Flux has been told to leave it alone.
+    if (!tuning_.tweaks_enabled) {
+        out.coalesced = true;
+        return out;
+    }
 
     const auto intents = IntentMapper::from_decision(decision);
     const std::string intent_id = intents.policy.intent_id;

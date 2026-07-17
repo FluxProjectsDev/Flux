@@ -104,7 +104,9 @@ TEST("policy intent: battery saver maps to powersave and never promotes") {
                                                  DecisionReason::battery_saver_enabled,
                                                  DecisionPriority::BatterySaver));
     CHECK_EQ(intent.behavior, BehaviorClass::PowerSave);
-    CHECK_EQ(intent.descriptor_key(), std::string("safe"));
+    CHECK_MSG(intent.descriptor_key() == std::string("power_save"),
+              "power save is its own descriptor key: a user who chose a slower phone and a "
+              "device shedding heat want different things from the CPU");
     CHECK(!intent.aggressive_promotion_permitted);
 }
 

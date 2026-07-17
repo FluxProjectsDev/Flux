@@ -71,8 +71,14 @@ std::string PolicyIntent::descriptor_key() const {
         case BehaviorClass::ConstrainedPerformance: return "constrained_performance";
         case BehaviorClass::Interactive:
         case BehaviorClass::Balanced: return "balanced";
+        // PowerSave is deliberately its own key, while Safe and Restore share one. Wanting less
+        // power and needing to shed heat are not the same ask: a user on battery saver chose a
+        // slower phone, and a thermal response is Flux protecting the device whatever the user
+        // chose. Collapsing them — which this did — meant a powersave profile applied the
+        // *balanced* governor, because "safe" is what a thermal fallback wants. The legacy
+        // script had a distinct powersave governor and was right to.
+        case BehaviorClass::PowerSave: return "power_save";
         case BehaviorClass::Safe:
-        case BehaviorClass::PowerSave:
         case BehaviorClass::Restore: return "safe";
     }
     return "safe";

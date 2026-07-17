@@ -118,6 +118,9 @@ void signal_daemon_update() {
     }
 }
 
+/// Defined below, once the config stores and the runtime are in scope.
+static void install_tuning_from_config(int64_t now_ms);
+
 /**
  * @brief Tell the execution runtime its capability assumptions may be stale.
  *
@@ -128,7 +131,11 @@ void signal_daemon_update() {
  */
 void invalidate_execution_capabilities(const char *reason) {
     if (!execution_runtime) return; // config can change before the runtime exists
-    execution_runtime->invalidate_capabilities(reason);
+    LOGD("Execution capabilities invalidated: {}", reason);
+    // Re-migrate rather than merely invalidating: the change may have been to a setting the
+    // tuning captured (a governor, a mitigation, the master switch), and re-reading it is the
+    // only way the new value reaches the descriptors. set_tuning() bumps the generation itself.
+    install_tuning_from_config(flux_monotonic_ms());
     signal_daemon_update();
 }
 
@@ -261,6 +268,38 @@ static constexpr int DAEMON_TICK_MS = 1000;
     // An unrecognised code means the generic pack only. Guessing a family is the one mistake
     // the whole descriptor design exists to prevent.
     return flux::execution::SocFamily::Unknown;
+}
+
+/**
+ * @brief Build the V2 tuning from stored configuration, and install it.
+ *
+ * The migration boundary. Settings the legacy shell read from FLUX_* environment variables are
+ * turned into semantic inputs here — governor choices, suppressed capabilities, and the master
+ * gate — and handed to the runtime, which expresses them as descriptor values rather than as
+ * commands. Nothing on this path can execute anything.
+ */
+static void install_tuning_from_config(int64_t now_ms) {
+    if (!execution_runtime) return;
+
+    const auto prefs = config_store.get_preferences();
+    const auto governors = config_store.get_cpu_governor();
+
+    flux::execution::LegacyConfigInput input;
+    input.disable_tweaks = prefs.disable_tweaks;
+    input.balanced_governor = governors.balance;
+    input.powersave_governor = governors.powersave;
+
+    // The mitigation set is device knowledge plus a user opt-in; the migration decides what each
+    // item means. Main.cpp does not interpret them.
+    const auto items = device_mitigation_store.get_cached_mitigation_items(prefs.use_device_mitigation);
+    input.mitigation_items.insert(items.begin(), items.end());
+
+    auto tuning = flux::execution::migrate_legacy_config(input);
+    for (const auto &note : tuning.notes) {
+        LOGI("config: {} -> {} ({})", note.key,
+             flux::execution::migration_outcome_name(note.outcome), note.detail);
+    }
+    execution_runtime->set_tuning(std::move(tuning), now_ms);
 }
 
 /**
@@ -712,9 +751,14 @@ int run_daemon() {
                 }
             });
 
-        LOGI("Execution runtime up: soc={} packs={} (vendor capabilities gated pending "
+        // Migrate stored configuration before the first cycle, so the very first apply already
+        // honours the user's settings rather than applying defaults and correcting itself.
+        install_tuning_from_config(flux_monotonic_ms());
+
+        LOGI("Execution runtime up: soc={} tweaks={} (vendor capabilities gated pending "
              "hardware validation)",
-             flux::execution::soc_family_name(soc), execution_runtime->capability_generation());
+             flux::execution::soc_family_name(soc),
+             execution_runtime->tweaks_enabled() ? "enabled" : "disabled by configuration");
     }
 
     // Give SynthesisCore a grace period to come up, but do not make Flux's existence

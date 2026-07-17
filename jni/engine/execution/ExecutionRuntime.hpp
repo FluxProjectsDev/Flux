@@ -29,6 +29,7 @@
 #include "ExecutionEngine.hpp"
 #include "PolicyIntent.hpp"
 #include "RuntimeProfileState.hpp"
+#include "RuntimeTuning.hpp"
 #include "SysfsNodeBackend.hpp"
 #include "ZenController.hpp"
 
@@ -121,6 +122,22 @@ public:
     void shutdown();
     [[nodiscard]] bool is_shut_down() const { return shut_down_; }
 
+    /**
+     * @brief Install migrated configuration.
+     *
+     * Applies the user's governor choices and mitigation suppressions to the packs, and sets the
+     * master gate. Bumps the capability generation: what the engine believes it verified was
+     * verified under the old settings.
+     *
+     * When tweaks are disabled this restores everything Flux changed, once, and then applies
+     * nothing until they are enabled again. A user who turned Flux off gets their device back,
+     * not merely an absence of further changes.
+     */
+    void set_tuning(RuntimeTuning tuning, int64_t now_ms);
+
+    [[nodiscard]] const RuntimeTuning &tuning() const { return tuning_; }
+    [[nodiscard]] bool tweaks_enabled() const { return tuning_.tweaks_enabled; }
+
     /// Bump when the device's capabilities may have changed: a config change, a descriptor
     /// change, a detected external mutation, or an explicit reapply. Invalidates the idempotency
     /// cache, so the next cycle writes rather than assuming its last values still hold.
@@ -141,7 +158,8 @@ public:
 private:
     // Declaration order is construction order, and each depends only on the ones above it.
     PathPolicy policy_;
-    std::vector<DevicePack> packs_;
+    std::vector<DevicePack> base_packs_; ///< as supplied; tuning is re-applied from these
+    std::vector<DevicePack> packs_;      ///< what the planner actually sees
     DeviceIdentity identity_;
     SysfsNodeBackend backend_;
     CapabilityProbe probe_;
@@ -150,6 +168,7 @@ private:
     RuntimeProfileState state_;
     std::optional<ZenController> zen_;
 
+    RuntimeTuning tuning_;
     StatusPublisher publisher_;
     SessionContext last_session_; ///< what the last cycle was told, for the status publisher
     uint64_t capability_generation_ = 1;

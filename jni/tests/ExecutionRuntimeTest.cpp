@@ -424,3 +424,121 @@ TEST("runtime: restore_all returns every value Flux changed, exactly") {
     CHECK_MSG(!runtime.state().has_verified_profile(),
               "after a restore the device is in its own state, not a Flux profile");
 }
+
+// --- the master switch, end to end -----------------------------------------
+
+TEST("runtime: disabled tweaks apply nothing at all") {
+    // The consent rule. Increment 4 deleted the dispatchers that enforced this, so until the
+    // migration was wired a user who turned Flux off still got their device tuned.
+    TempTree tree;
+    ExecutionRuntime runtime({generic_on(tree)}, {SocFamily::Generic, "fake"}, tree.policy());
+
+    RuntimeTuning off;
+    off.tweaks_enabled = false;
+    runtime.set_tuning(off, 1000);
+
+    const auto cycle = runtime.on_decision(performance_decision(), game_session(), 1100);
+
+    CHECK_MSG(!cycle.applied, "a disabled runtime must not reach the engine");
+    CHECK_MSG(tree.governor0() == "schedutil",
+              "a user who turned tweaks off must find their device untouched, got: " +
+                  tree.governor0());
+}
+
+TEST("runtime: turning tweaks off gives the device back, it does not merely stop") {
+    TempTree tree;
+    ExecutionRuntime runtime({generic_on(tree)}, {SocFamily::Generic, "fake"}, tree.policy());
+
+    (void)runtime.on_decision(performance_decision(), game_session(), 1000);
+    CHECK_EQ(tree.governor0(), std::string("performance"));
+
+    RuntimeTuning off;
+    off.tweaks_enabled = false;
+    runtime.set_tuning(off, 2000);
+
+    CHECK_MSG(tree.governor0() == "schedutil",
+              "turning tweaks off must restore what Flux changed, not freeze it in place; got: " +
+                  tree.governor0());
+    CHECK_MSG(!runtime.state().has_verified_profile(),
+              "after restoring, the device is in its own state, not a Flux profile");
+}
+
+TEST("runtime: re-enabling tweaks applies again") {
+    TempTree tree;
+    ExecutionRuntime runtime({generic_on(tree)}, {SocFamily::Generic, "fake"}, tree.policy());
+
+    RuntimeTuning off;
+    off.tweaks_enabled = false;
+    runtime.set_tuning(off, 1000);
+    (void)runtime.on_decision(performance_decision(), game_session(), 1100);
+    CHECK_EQ(tree.governor0(), std::string("schedutil"));
+
+    runtime.set_tuning(RuntimeTuning{}, 2000); // defaults: enabled
+    const auto cycle = runtime.on_decision(performance_decision(), game_session(), 2100);
+
+    CHECK_MSG(cycle.apply.verified_active, "re-enabling must resume applying: " + cycle.apply.message);
+    CHECK_EQ(tree.governor0(), std::string("performance"));
+}
+
+TEST("runtime: a migrated governor choice is what actually reaches the device") {
+    TempTree tree;
+    ExecutionRuntime runtime({generic_on(tree)}, {SocFamily::Generic, "fake"}, tree.policy());
+
+    LegacyConfigInput input;
+    input.balanced_governor = "walt";
+    runtime.set_tuning(migrate_legacy_config(input), 1000);
+
+    // no_transition, not session_ended: session_ended means *restore*, which maps to the safe
+    // key and the kernel's own balanced behaviour — not to the user's balanced governor.
+    (void)runtime.on_decision(decide(eng::TargetProfile::Balanced, eng::DecisionReason::no_transition,
+                                     eng::DecisionPriority::NoncriticalPreference),
+                              SessionContext{}, 1100);
+
+    CHECK_MSG(tree.governor0() == "walt",
+              "the user's stored governor must be the value the engine verifies, got: " +
+                  tree.governor0());
+}
+
+TEST("runtime: a migrated setting still has to pass verification") {
+    // Migration is not a bypass. A migrated value goes through probe, plan, write and read-back
+    // like anything else — it does not get to declare itself active.
+    TempTree tree;
+    ExecutionRuntime runtime({generic_on(tree)}, {SocFamily::Generic, "fake"}, tree.policy());
+
+    LegacyConfigInput input;
+    input.balanced_governor = "walt";
+    runtime.set_tuning(migrate_legacy_config(input), 1000);
+
+    for (int policy : {0, 4, 7}) {
+        std::filesystem::permissions(
+            tree.rebase("/sys/devices/system/cpu/cpufreq/policy" + std::to_string(policy) +
+                        "/scaling_governor"),
+            std::filesystem::perms::none);
+    }
+
+    const auto cycle = runtime.on_decision(
+        decide(eng::TargetProfile::Balanced, eng::DecisionReason::no_transition,
+               eng::DecisionPriority::NoncriticalPreference),
+        SessionContext{}, 1100);
+
+    CHECK_MSG(!cycle.apply.verified_active,
+              "an unwritable node must fail even when the value came from configuration");
+    CHECK_MSG(!runtime.state().has_verified_profile(),
+              "a migrated setting does not make a profile active; verification does");
+}
+
+TEST("runtime: installing tuning invalidates what was verified under the old settings") {
+    TempTree tree;
+    ExecutionRuntime runtime({generic_on(tree)}, {SocFamily::Generic, "fake"}, tree.policy());
+
+    (void)runtime.on_decision(performance_decision(), game_session(), 1000);
+    const uint64_t before = runtime.capability_generation();
+
+    LegacyConfigInput input;
+    input.balanced_governor = "walt";
+    runtime.set_tuning(migrate_legacy_config(input), 2000);
+
+    CHECK_MSG(runtime.capability_generation() > before,
+              "new settings mean the last verification was made under assumptions that no "
+              "longer hold");
+}

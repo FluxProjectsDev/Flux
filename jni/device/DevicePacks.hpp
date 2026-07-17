@@ -41,6 +41,7 @@ namespace flux::device {
 inline constexpr const char *kIntentSustainedPerformance = "sustained_performance";
 inline constexpr const char *kIntentConstrainedPerformance = "constrained_performance";
 inline constexpr const char *kIntentBalanced = "balanced";
+inline constexpr const char *kIntentPowerSave = "power_save";
 inline constexpr const char *kIntentSafe = "safe";
 
 /** Every candidate pack, one per SoC family, plus the generic set. */
