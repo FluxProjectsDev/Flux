@@ -36,6 +36,7 @@
 #include "FluxConfigStore.hpp"
 #include "InotifyHandler.hpp"
 #include "Profiler.hpp"
+#include "Write2File.hpp"
 
 #include <AndroidZenBackend.hpp>         // the single zen write entry point
 #include <DecisionAdapter.hpp>          // Flux V2 Decision Engine (pulls in ProfilePolicy.hpp types)
