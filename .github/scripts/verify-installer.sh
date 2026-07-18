@@ -434,8 +434,146 @@ fi
 grep -q "validation-gated" "${REF_LOG}" ||
 	fail "the summary does not state that vendor capabilities remain validation-gated"
 
-# ═══ 6. Blast radius ═════════════════════════════════════════════════════════
-head2 "6. Blast radius"
+# ═══ 6. Action button and Donate/Support ═════════════════════════════════════
+head2 "6. Action button and Donate/Support"
+
+# action.sh must SURVIVE on the two managers that actually have an Action button. customize.sh
+# used to delete it on exactly those, which is the regression this pins.
+for mgr in ksu apatch magisk unknown; do
+	[ -s "$(case_root_of "${mgr}")/modpath/action.sh" ] ||
+		fail "action.sh was not installed on ${mgr}"
+done
+green "  action.sh is installed on Magisk, KernelSU, APatch and an unknown manager"
+
+# run_action <name> <config-donation-url> <env assignments...>
+# Runs the shipped action.sh with a stubbed Activity Manager that records what it was asked to
+# open, so the assertions are about the intent actually issued rather than about the script text.
+run_action() {
+	local name="$1" donate="$2"
+	shift 2
+	local ar="${ROOT}/action-${name}"
+	rm -rf "${ar}"
+	mkdir -p "${ar}/mod/installer" "${ar}/bin"
+
+	cp module/action.sh "${ar}/mod/action.sh"
+	sed "s|^OFFICIAL_DONATION_URL=.*|OFFICIAL_DONATION_URL=\"${donate}\"|" \
+		module/installer/config.sh >"${ar}/mod/installer/config.sh"
+
+	cat >"${ar}/bin/am" <<AMEOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"${ar}/am.calls"
+exit 0
+AMEOF
+	cat >"${ar}/bin/pm" <<'PMEOF'
+#!/bin/sh
+# No WebUI viewer is installed, so the Magisk path falls through to its release-page hint.
+exit 1
+PMEOF
+	chmod +x "${ar}/bin/am" "${ar}/bin/pm"
+	: >"${ar}/am.calls"
+
+	(
+		# A minimal PATH containing only the stubs plus the real coreutils this script uses.
+		export PATH="${ar}/bin:/usr/bin:/bin"
+		for assign in "$@"; do export "${assign?}"; done
+		sh "${ar}/mod/action.sh"
+	) >"${ar}/out.log" 2>&1
+	echo "${ar}"
+}
+
+DONATE_URL="https://example.org/flux-support"
+
+# A. Donation configured, manager with a native WebUI -> Action opens Support.
+AR="$(run_action ksu-configured "${DONATE_URL}" "KSU=true" "KSU_VER_CODE=11986")"
+grep -qF "${DONATE_URL}" "${AR}/am.calls" ||
+	fail "KernelSU with a configured donation URL did not open it (am calls: $(cat "${AR}/am.calls"))"
+grep -qF "android.intent.action.VIEW" "${AR}/am.calls" ||
+	fail "the donation link was not opened with an explicit VIEW intent"
+green "  KernelSU + configured URL: Action opens Support via an explicit VIEW intent"
+
+AR="$(run_action apatch-configured "${DONATE_URL}" "KSU=true" "APATCH=true")"
+grep -qF "${DONATE_URL}" "${AR}/am.calls" ||
+	fail "APatch with a configured donation URL did not open it"
+green "  APatch + configured URL: Action opens Support (not misrouted as KernelSU)"
+
+# B. No donation configured -> nothing is opened, and the script still succeeds.
+AR="$(run_action ksu-unconfigured "" "KSU=true")"
+if [ -s "${AR}/am.calls" ]; then
+	fail "with no donation URL configured, action.sh still opened something: $(cat "${AR}/am.calls")"
+else
+	green "  No URL configured: nothing is opened at all"
+fi
+grep -qi "does not currently have an official donation page" "${AR}/out.log" ||
+	fail "the unconfigured case does not tell the user plainly that there is no donation page"
+grep -qF "https://github.com/FluxProjectsDev/Flux" "${AR}/out.log" ||
+	fail "the unconfigured case does not offer the repository as the alternative"
+
+# C. Magisk has no WebUI button, so Action must spend itself on the WebUI instead.
+AR="$(run_action magisk "${DONATE_URL}" "MAGISKTMP=/sbin/.magisk")"
+grep -qF "${DONATE_URL}" "${AR}/am.calls" &&
+	fail "Magisk Action opened the donation page; it must open the WebUI"
+grep -qi "webui" "${AR}/out.log" ||
+	fail "Magisk Action did not attempt to open the WebUI"
+green "  Magisk: Action opens the WebUI, which the card cannot otherwise reach"
+
+# D. MMRL opens the WebUI from the card; the script must not fight it.
+AR="$(run_action mmrl "${DONATE_URL}" "MMRL=1")"
+if [ -s "${AR}/am.calls" ]; then
+	fail "under MMRL, action.sh started an activity instead of deferring to the card"
+else
+	green "  MMRL: defers to the module card, starts nothing"
+fi
+
+# E. Activity Manager unavailable -> graceful, and the URL is still shown.
+AR_NOAM="${ROOT}/action-noam"
+rm -rf "${AR_NOAM}"
+mkdir -p "${AR_NOAM}/mod/installer" "${AR_NOAM}/bin"
+cp module/action.sh "${AR_NOAM}/mod/action.sh"
+sed "s|^OFFICIAL_DONATION_URL=.*|OFFICIAL_DONATION_URL=\"${DONATE_URL}\"|" \
+	module/installer/config.sh >"${AR_NOAM}/mod/installer/config.sh"
+(
+	# No `am` on PATH at all.
+	export PATH="${AR_NOAM}/bin:/usr/bin:/bin"
+	export KSU=true
+	sh "${AR_NOAM}/mod/action.sh"
+) >"${AR_NOAM}/out.log" 2>&1
+NOAM_RC=$?
+[ "${NOAM_RC}" -eq 0 ] || fail "action.sh exited ${NOAM_RC} when the Activity Manager was absent"
+grep -qF "${DONATE_URL}" "${AR_NOAM}/out.log" ||
+	fail "with no Activity Manager, the URL was not printed for the user to open manually"
+green "  Activity Manager absent: exits cleanly and prints the URL instead"
+
+# F. No arbitrary URL and no shell execution surface.
+# Comment lines are stripped first. The file's own header states "No eval", and matching the
+# raw text would flag that sentence — a check that fails on its own documentation trains people
+# to ignore it.
+ACTION_CODE="$(sed -E 's/#.*$//' module/action.sh)"
+if grep -qE '\beval\b' <<<"${ACTION_CODE}"; then
+	fail "action.sh uses eval"
+fi
+# Every URL in the script must be a literal https:// constant or a reference to the config file's
+# variables. A URL assembled from anything else is the thing this check exists to prevent.
+BAD_URLS="$(grep -oE '(-d|open_url) +"?\$[A-Za-z_]+' <<<"${ACTION_CODE}" |
+	grep -vE 'OFFICIAL_DONATION_URL|FLUX_REPO_URL|\$1' || true)"
+if [ -n "${BAD_URLS}" ]; then
+	fail "action.sh opens a URL from an unexpected variable: ${BAD_URLS}"
+else
+	green "  no eval, and every destination is a project-controlled constant"
+fi
+
+# G. The committed default must stay unconfigured until a real URL is verified.
+COMMITTED_DONATE="$(sed -n 's/^OFFICIAL_DONATION_URL=//p' module/installer/config.sh | tr -d '"'"'"'"')"
+if [ -n "${COMMITTED_DONATE}" ]; then
+	case "${COMMITTED_DONATE}" in
+	https://*) info "a donation URL is configured: ${COMMITTED_DONATE}" ;;
+	*) fail "OFFICIAL_DONATION_URL is set to a non-https value: ${COMMITTED_DONATE}" ;;
+	esac
+else
+	green "  OFFICIAL_DONATION_URL is unset, so no donate metadata or button is claimed"
+fi
+
+# ═══ 7. Blast radius ═════════════════════════════════════════════════════════
+head2 "7. Blast radius"
 if [ -e /data/adb/modules/flux ]; then
 	fail "a real module directory exists on this host — the fixtures must never touch it"
 else
