@@ -174,10 +174,20 @@ flux_finalize() {
 	flux_verify_clean_tree
 	flux_cleanup_temp
 
+	# Reported with flux_info in BOTH branches, deliberately. An unidentified SoC family is not a
+	# limitation and must not downgrade the summary: Flux gates every vendor capability behind
+	# runtime certification anyway, so an unrecognised family means the runtime uses the same safe
+	# generic behavior the summary already promises for any uncertified capability. Nothing the
+	# user installed is missing or degraded.
+	#
+	# It was a flux_step_warn until CI ran these fixtures on an x86 runner, where no family
+	# matches, and every clean install came back as SUCCESS WITH LIMITATIONS. That is the failure
+	# mode a warning state has to avoid: firing on the normal case teaches people that warnings
+	# are noise, and then the real ones are ignored too.
 	if flux_identify_soc; then
 		flux_info "SoC family detected: ${FLUX_SOC_NAME}"
 	else
-		flux_step_warn "SoC family could not be identified; generic behavior will be used"
+		flux_info "SoC family not identified; safe generic behavior will be used"
 	fi
 	# Written for the runtime to read. Detection only: no tuning is applied here, and no vendor
 	# capability is promoted by having identified a family.

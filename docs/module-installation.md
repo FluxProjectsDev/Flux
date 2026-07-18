@@ -81,6 +81,12 @@ unavailable and is named in the log. Causes include an unrecognised manager, a
 missing branding asset, no manager `bin` directory to symlink into, or a
 configuration that had to be reset.
 
+An unidentified SoC family is *not* one of them. Flux gates vendor capability
+behind runtime certification regardless, so an unrecognised family simply means
+the runtime uses the safe generic behaviour the summary already promises — nothing
+the user installed is missing, and reporting it as a limitation would be crying
+wolf on a healthy install.
+
 **Aborted** — a critical requirement failed. Nothing is kept, temporary files are
 removed, and no success line is printed. This is structural rather than a
 convention: the abort path does not return, so the summary is unreachable after

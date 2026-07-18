@@ -209,8 +209,15 @@ check_clean_install() {
 		grep -q "installed with limitations" "${log}" ||
 			fail "${name}: expected SUCCESS WITH LIMITATIONS, got: $(grep -m1 'Flux installed' "${log}")"
 	else
-		grep -q "Flux installed successfully" "${log}" ||
+		if ! grep -q "Flux installed successfully" "${log}"; then
 			fail "${name}: expected unqualified success, got: $(grep -m1 'Flux installed' "${log}")"
+			# Print the warnings that caused the downgrade. Without this the failure says only
+			# that the summary was wrong, which is the least useful half of the information —
+			# the interesting part is always WHICH optional item was unavailable, and that
+			# differs between a developer machine and a CI runner.
+			printf '    warnings that downgraded it:\n' >&2
+			grep -E '\[WARN\]|⚠' "${log}" | sed 's/^/      /' >&2
+		fi
 	fi
 	grep -q "Manager: ${expect_manager}" "${log}" ||
 		fail "${name}: expected 'Manager: ${expect_manager}', got: $(grep -m1 'Manager:' "${log}")"
@@ -248,6 +255,22 @@ LOG="$(run_install apatch "${PKG}" "KSU=true" "APATCH=true" "APATCH_VER_CODE=106
 check_clean_install apatch "${LOG}" "${RC}" "APatch"
 [ -f "$(case_root_of apatch)/modpath/skip_mount" ] || fail "apatch: skip_mount was not created"
 green "  APatch clean install (not misreported as KernelSU despite KSU=true)"
+
+# SoC identification must never downgrade the summary, whichever way it resolves. This host may
+# or may not match a family — an ARM dev machine usually does, an x86 CI runner does not — so the
+# assertion is on the *severity*, not the outcome: it is informational in both branches, because
+# an unidentified family means the runtime uses the generic behavior the summary already
+# promises, not that anything the user installed is missing.
+for mgr in magisk ksu apatch; do
+	SOC_LINE="$(grep -i 'SoC family' "$(case_root_of "${mgr}")/install.log" || true)"
+	if [ -z "${SOC_LINE}" ]; then
+		fail "${mgr}: the installer reported nothing about SoC identification"
+	elif grep -qE '\[WARN\]|⚠' <<<"${SOC_LINE}"; then
+		fail "${mgr}: SoC identification produced a WARNING, which downgrades a healthy install:"
+		fail "  ${SOC_LINE}"
+	fi
+done
+green "  SoC identification is informational and never downgrades the summary"
 
 LOG="$(run_install unknown "${PKG}")" && RC=0 || RC=$?
 # An unrecognised manager is a genuine limitation, so the summary must be downgraded.
