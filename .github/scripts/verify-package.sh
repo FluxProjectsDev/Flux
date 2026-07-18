@@ -215,6 +215,12 @@ REQUIRED_ENTRIES=(
 	"uninstall.sh"
 	"service.sh"
 	"module.prop"
+	# verify.sh is the installer trust root and action.sh is the manager Action button. Both are
+	# listed because both have been dropped from a package before: verify.sh by a packaging
+	# change, action.sh by customize.sh deleting it at install time on KernelSU and APatch.
+	"verify.sh"
+	"action.sh"
+	"cleanup.sh"
 )
 for entry in "${REQUIRED_ENTRIES[@]}"; do
 	if grep -q "\(^\|/\)${entry##*/}$" "${MANIFEST}"; then
@@ -380,6 +386,120 @@ for name in update.json changelog.md; do
 		green "  absent: ${name} (release asset, not module content)"
 	fi
 done
+
+# ── 10. Installer payload and its checksums ──────────────────────────────────
+head2 "10. Installer components"
+# customize.sh sources these AS ROOT on a user's device. verify.sh checks each against its
+# packaged digest before sourcing, so a component that ships without its .sha256 does not
+# silently skip verification — it aborts the install. Both halves must therefore be present.
+INSTALLER_HELPERS=(config.sh ui.sh integrity.sh environment.sh compatibility.sh
+	payload.sh permissions.sh migration.sh finalize.sh)
+INSTALLER_OK=1
+for helper in "${INSTALLER_HELPERS[@]}"; do
+	if [ ! -s "${WORK}/pkg/installer/${helper}" ]; then
+		fail "installer component missing from the package: installer/${helper}"
+		INSTALLER_OK=0
+		continue
+	fi
+	if [ ! -s "${WORK}/pkg/installer/${helper}.sha256" ]; then
+		fail "installer/${helper} ships without a checksum — the installer verifies each"
+		fail "  component before sourcing it, so a missing digest aborts every install"
+		INSTALLER_OK=0
+		continue
+	fi
+	stated="$(tr -d ' \t\r\n' <"${WORK}/pkg/installer/${helper}.sha256")"
+	actual="$(sha256sum "${WORK}/pkg/installer/${helper}" | cut -d' ' -f1)"
+	if [ "${stated}" != "${actual}" ]; then
+		fail "installer/${helper}.sha256 does not match the file it describes"
+		INSTALLER_OK=0
+	fi
+done
+[ "${INSTALLER_OK}" -eq 1 ] &&
+	green "  all ${#INSTALLER_HELPERS[@]} installer components present, each with a matching checksum"
+
+# ── 11. Branding assets resolve ──────────────────────────────────────────────
+head2 "11. Branding and module.prop asset references"
+# A metadata key pointing at a file that is not in the package makes a manager render a broken
+# card. Checked against the package, because the source tree having the asset says nothing about
+# whether packaging copied it.
+if [ -f "${PROP:-/nonexistent}" ]; then
+	ASSETS_OK=1
+	for key in banner webuiIcon actionIcon donateIcon; do
+		value="$(sed -n "s/^${key}=//p" "${PROP}" | head -1)"
+		[ -n "${value}" ] || continue
+		if [ -s "${WORK}/pkg/${value}" ]; then
+			green "  ${key}=${value} resolves ($(du -h "${WORK}/pkg/${value}" | cut -f1))"
+		else
+			fail "module.prop ${key}=${value} points at a file that is not in the package"
+			ASSETS_OK=0
+		fi
+	done
+	[ "${ASSETS_OK}" -eq 1 ] || fail "  a manager would show a broken module card"
+
+	# donate and donateIcon are written together by compile_zip.sh or not at all. A donate URL
+	# with no icon, or an icon with no URL, means the packaging step half-ran.
+	DONATE_URL="$(sed -n 's/^donate=//p' "${PROP}" | head -1)"
+	DONATE_ICON="$(sed -n 's/^donateIcon=//p' "${PROP}" | head -1)"
+	if [ -n "${DONATE_URL}" ]; then
+		case "${DONATE_URL}" in
+		https://*) green "  donate=${DONATE_URL} (https)" ;;
+		*) fail "donate must be an https:// URL, got '${DONATE_URL}'" ;;
+		esac
+		[ -n "${DONATE_ICON}" ] || fail "donate is set but donateIcon is not"
+	elif [ -n "${DONATE_ICON}" ]; then
+		fail "donateIcon is set but donate is not — the module would show an icon with no target"
+	else
+		info "no donate metadata (OFFICIAL_DONATION_URL is unconfigured); nothing is claimed"
+	fi
+
+	# The support link must point at this repository's issue tracker.
+	SUPPORT="$(sed -n 's/^support=//p' "${PROP}" | head -1)"
+	if [ -z "${SUPPORT}" ]; then
+		fail "module.prop has no support URL"
+	elif [ -n "${GITHUB_REPOSITORY:-}" ] && ! grep -qF "github.com/${GITHUB_REPOSITORY}" <<<"${SUPPORT}"; then
+		fail "support '${SUPPORT}' does not point at ${GITHUB_REPOSITORY}"
+	else
+		green "  support=${SUPPORT}"
+	fi
+fi
+
+# The editable asset sources are build inputs, not module content. module/assets/ is excluded
+# from the ZIP; assert that, because the exclusion is one glob in compile_zip.sh away from
+# shipping every SVG twice over.
+if [ -d "${WORK}/pkg/assets" ]; then
+	fail "the package ships module/assets/ — that is the editable source tree, and the rasters"
+	fail "  it produces were already copied to the module-root paths module.prop names"
+fi
+if grep -qE '\.svg$' "${MANIFEST}"; then
+	fail "the package ships an SVG; only the rendered rasters belong in a module"
+else
+	green "  no SVG sources or assets/ directory in the package"
+fi
+
+# ── 12. Shell hygiene in what ships ──────────────────────────────────────────
+head2 "12. Shipped shell scripts"
+# CRLF is the failure that looks like nothing: the manager's shell reads `#!/system/bin/sh\r`,
+# fails to find the interpreter, and the module simply does not run, with no useful error.
+CRLF_HITS=""
+while IFS= read -r sh_file; do
+	if grep -qU $'\r' "${sh_file}" 2>/dev/null; then
+		CRLF_HITS="${CRLF_HITS}${sh_file#"${WORK}/pkg/"}"$'\n'
+	fi
+done < <(find "${WORK}/pkg" -type f -name '*.sh')
+if [ -n "${CRLF_HITS}" ]; then
+	fail "shipped shell script(s) have CRLF line endings:"
+	printf '%s' "${CRLF_HITS}" >&2
+else
+	green "  no CRLF in any shipped shell script"
+fi
+
+# Installer scratch files must never be packaged.
+for junk in .flux-verify .flux-config-stage .flux-ub; do
+	if grep -q "${junk}" "${MANIFEST}"; then
+		fail "the package contains installer scratch state: ${junk}"
+	fi
+done
+green "  no installer scratch state in the package"
 
 head2 "═══ Result ═══"
 if [ "${FAILURES}" -ne 0 ]; then

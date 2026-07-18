@@ -108,21 +108,32 @@ else
 	fail "upgrade destroyed the user's configuration"
 fi
 
-# ── 2. The packaged customize.sh actually contains the cleanup ───────────────
+# ── 2. The shipped installer actually contains the cleanup ───────────────────
 head2 "2. The shipped installer contains the cleanup"
-# The fixture above proves the *logic* is right. This proves the logic is in the script that
-# ships — the two are different claims, and only the second one reaches a device.
-# shellcheck disable=SC2016  # the literal '$dir' is the point: we are grepping for the shell
-# source customize.sh ships, not expanding a variable of our own.
-if grep -qF 'rm -f "$dir/flux_profiler"' module/customize.sh; then
-	green "  customize.sh removes the stale symlink on upgrade"
+# The fixture above proves the *logic* is right. This proves the logic is in the code that ships —
+# different claims, and only the second one reaches a device.
+#
+# Searched across the whole installer, not in customize.sh by name. The cleanup lives in
+# installer/migration.sh since the installer was split into stages, and a check pinned to one
+# filename does not survive a refactor: it goes red for a move that changed no behaviour, which
+# teaches people to edit the check instead of reading it. What must be true is that the shipped
+# installer removes the symlink, wherever that code sits.
+#
+# verify-installer.sh proves the same property far more strongly, by executing the installer
+# against a fixture that contains a real stale symlink and asserting it is gone afterwards. This
+# stays as the cheap source-level backstop for the case where that script is skipped.
+INSTALLER_SRC="module/customize.sh module/verify.sh $(find module/installer -name '*.sh' | sort | tr '\n' ' ')"
+# shellcheck disable=SC2086  # deliberate word splitting: the list is built above, not user input
+if grep -qE 'rm -f "\$\{?_?dir\}?/flux_profiler"' ${INSTALLER_SRC}; then
+	green "  the installer removes the stale flux_profiler symlink on upgrade"
 else
-	fail "module/customize.sh does not remove the stale flux_profiler symlink"
+	fail "no installer component removes the stale flux_profiler symlink"
 fi
-if grep -qE '^[^#]*extract .*flux_profiler' module/customize.sh; then
-	fail "module/customize.sh still extracts flux_profiler"
+# shellcheck disable=SC2086
+if grep -qE '^[^#]*flux_extract_verified .*flux_profiler|^[^#]*extract .*flux_profiler' ${INSTALLER_SRC}; then
+	fail "the installer still extracts flux_profiler"
 else
-	green "  customize.sh does not install the legacy applier"
+	green "  the installer does not install the legacy applier"
 fi
 
 # ── 3. Uninstall removes Flux, and only Flux ─────────────────────────────────
@@ -172,10 +183,13 @@ fi
 
 # ── 5. Unsupported ABI is refused, not guessed ───────────────────────────────
 head2 "5. Unsupported ABI"
-if grep -q "abort_unsupported_arch" module/customize.sh; then
-	green "  customize.sh aborts on an unsupported architecture"
+# Same reasoning as section 2: the refusal now lives in installer/compatibility.sh
+# (flux_resolve_abi), so the search covers the installer rather than one filename.
+# shellcheck disable=SC2086
+if grep -qE 'Unsupported CPU architecture' ${INSTALLER_SRC}; then
+	green "  the installer aborts on an unsupported architecture"
 else
-	fail "customize.sh does not abort on an unsupported architecture"
+	fail "the installer does not abort on an unsupported architecture"
 fi
 
 # ── 6. Nothing outside the fixture changed ───────────────────────────────────
