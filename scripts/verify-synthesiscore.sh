@@ -119,7 +119,7 @@ if [ "${SCHEMA_PROVIDED}" -lt "${SCHEMA_MIN}" ] || [ "${SCHEMA_PROVIDED}" -gt "$
 	err "build requires schema ${SCHEMA_MIN}..${SCHEMA_MAX}."
 	err ""
 	err "Remaining release step:"
-	err "  1. Build SynthesisCore from its feat/telemetry-contract-v2 branch"
+	err "  1. Build SynthesisCore from its main branch"
 	err "     (./gradlew :app:assembleRelease), sign it, and publish a release."
 	err "  2. Run: scripts/update-synthesiscore-lock.sh <tag> <path-to-app-release.apk>"
 	err "  3. Commit prebuilt/synthesiscore.apk and dependencies/synthesiscore.lock together."

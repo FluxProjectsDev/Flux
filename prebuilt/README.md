@@ -1,6 +1,6 @@
 This folder contains following prebuilt programs:
 
-[SynthesisCore](https://github.com/elyraos-dev/SynthesisCore): the telemetry provider Flux
+[SynthesisCore](https://github.com/FluxProjectsDev/SynthesisCore): the telemetry provider Flux
 consumes. `synthesiscore.apk` is not built here — it is a pinned release artifact, and which
 release is pinned is recorded in [`dependencies/synthesiscore.lock`](../dependencies/synthesiscore.lock).
 
