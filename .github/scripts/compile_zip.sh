@@ -34,12 +34,14 @@ cp -r ./libs module
 # a device: customize.sh never installs it, so copying everything only padded the zip with dead
 # tooling. This is an allowlist on purpose — a new script has to be named here to ship, rather
 # than reaching users because it happened to land in the directory.
-for runtime_script in flux_profiler flux_utility; do
-	cp "./scripts/${runtime_script}.sh" module/system/bin/ || {
-		echo "Missing runtime script: scripts/${runtime_script}.sh" >&2
-		exit 1
-	}
-done
+# flux_utility is the only runtime script left. flux_profiler.sh was the legacy shell applier
+# and is gone: the V2 ExecutionEngine applies profiles, and packaging a script nothing can invoke
+# would leave a working copy of the old write path on every device for someone to run by hand.
+# This was a loop over both; a loop over one entry is just a copy.
+cp ./scripts/flux_utility.sh module/system/bin/ || {
+	echo "Missing runtime script: scripts/flux_utility.sh" >&2
+	exit 1
+}
 cp gamelist.txt module
 cp LICENSE module
 cp NOTICE.md module

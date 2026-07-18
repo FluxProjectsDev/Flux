@@ -8,7 +8,9 @@ LOCAL_SRC_FILES := $(wildcard $(LOCAL_PATH)/*.cpp)
 LOCAL_SRC_FILES := $(LOCAL_SRC_FILES:$(LOCAL_PATH)/%=%)
 
 # Pure: depends only on the standard library and its own headers.
-LOCAL_C_INCLUDES := $(ROOT_PATH)/include
+# PolicyIntent maps a Decision into device-independent intents, so it needs the
+# decision vocabulary (header-only usage: Decision, DecisionReason, priorities).
+LOCAL_C_INCLUDES := $(ROOT_PATH)/include $(ROOT_PATH)/engine/decision
 
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)
 

@@ -1,6 +1,6 @@
 # NOTICE
 
-Flux Tweaks
+Flux
 Copyright (C) 2024-2026 FebriCahyaa
 
 This product includes software developed as part of the Flux project and
@@ -33,10 +33,16 @@ and remains under Apache-2.0 while that derived material is present:
   - the native daemon and supporting modules under `jni/` (excluding the Flux V2
     engine under `jni/engine/` and the host tests under `jni/tests/`, which are
     Flux-authored);
-  - the profiler and utility shell scripts under `scripts/`;
+  - the utility shell script under `scripts/` (`flux_utility.sh`; the profiler shell
+    applier was removed after the V2 execution cutover — its device knowledge is
+    retained, and still attributed, as declarative descriptors under `jni/device/`);
   - the Magisk/KernelSU/APatch module scripts under `module/`;
   - the WebUI application under `webui/src/`;
-  - the game-detection data in `gamelist.txt`.
+  - the game-detection data in `gamelist.txt`;
+  - the per-SoC device tuning knowledge expressed as declarative capability
+    descriptors in `jni/device/` (re-expressed as data and gated behind runtime
+    capability probing; the execution mechanism that consumes them is
+    Flux-authored — see `jni/engine/execution/`, below).
 
 Files adapted from Encore Tweaks carry both the original copyright notice and a
 notice that they have been modified by the Flux project. These attributions will

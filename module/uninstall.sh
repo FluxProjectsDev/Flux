@@ -21,6 +21,10 @@
 rm -rf /data/adb/.config/flux
 rm -f /data/adb/service.d/.flux_cleanup.sh
 
+# flux_profiler is still listed although Flux no longer ships it: an install from before the V2
+# execution cutover created these symlinks, and uninstall has to clean up what *previous*
+# versions left behind, not only what this one installs. Removing it from this list would strand
+# a dangling symlink on every device that ever ran an older Flux.
 need_gone="fluxd flux_profiler flux_utility"
 manager_paths="/data/adb/ap/bin /data/adb/ksu/bin"
 

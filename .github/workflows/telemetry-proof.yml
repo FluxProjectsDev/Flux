@@ -74,12 +74,27 @@ jobs:
       - name: Prove SynthesisCore schema-v2 compatibility
         run: bash .github/scripts/verify-schema-provenance.sh
 
+      # The Category A / Category C boundary is a licensing position, not a style rule: if the
+      # device tables ever grow control flow, the engine's independence claim goes with them.
+      # Checked before the build, because it needs no build to be true.
+      - name: Prove the Category A / Category C boundary
+        run: bash .github/scripts/verify-provenance-boundary.sh
+
       - name: Build Flux Daemon
         run: ndk-build -j"$(nproc --all)"
 
       # The core of this workflow: what is actually linked into fluxd.
       - name: Prove V2 telemetry link and symbols
         run: bash .github/scripts/verify-native-telemetry.sh
+
+      # The cutover proof: the V2 execution engine is what writes, and the legacy shell applier
+      # cannot be invoked. Checks the built binary's symbols, imports and strings — a source
+      # search cannot tell a live call from a mention in a comment.
+      - name: Prove V2 live execution and legacy deactivation (arm64-v8a)
+        run: bash .github/scripts/verify-live-execution.sh arm64-v8a
+
+      - name: Prove V2 live execution and legacy deactivation (armeabi-v7a)
+        run: bash .github/scripts/verify-live-execution.sh armeabi-v7a
 
       # Build the WebUI so the package under validation is the package that ships, not a
       # stripped-down approximation of it.
@@ -95,9 +110,32 @@ jobs:
         run: bash .github/scripts/compile_zip.sh
 
       - name: Validate flashable package
+        id: validatePackage
         env:
           ZIP: ${{ steps.compileZip.outputs.zipName }}
         run: bash .github/scripts/verify-package.sh "$ZIP"
+
+      - name: Prove Stage 2 release readiness (inventory, module.prop, secrets)
+        id: releaseReadiness
+        env:
+          ZIP: ${{ steps.compileZip.outputs.zipName }}
+          INVENTORY_OUT: package-inventory.tsv
+        run: bash .github/scripts/verify-release-readiness.sh "$ZIP"
+
+      - name: Prove module lifecycle (install / upgrade / uninstall)
+        id: lifecycle
+        run: bash .github/scripts/verify-lifecycle.sh
+
+      # The aggregate. It does not check that other jobs *exist* — it re-asserts, in one place,
+      # the specific guarantees whose individual steps must all have run in *this* job to reach
+      # here, and it writes the summary a reviewer reads to decide the PR is ready. Because it is
+      # the last step of a job whose earlier steps fail the run on any violation, it cannot be
+      # reached while any guarantee is unproven: there is no path to this step that skips them.
+      - name: Stage 2 aggregate proof
+        run: |
+          bash .github/scripts/verify-stage2-aggregate.sh
+        env:
+          INVENTORY: package-inventory.tsv
 
       # Kept for inspection when a proof fails. This is an Actions artifact for humans, not a
       # release: nothing here uploads to a tag or a release.
@@ -109,5 +147,6 @@ jobs:
           path: |
             obj/local/*/fluxd
             libs/*/fluxd
+            package-inventory.tsv
           retention-days: 7
           if-no-files-found: warn

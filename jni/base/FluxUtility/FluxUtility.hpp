@@ -73,23 +73,14 @@ const char *zen_mode_to_dnd_arg(int zen_mode);
 /**
  * @brief Restore an exact zen mode via shell.
  *
- * Use this — not set_do_not_disturb() — whenever restoring a mode that came from telemetry.
+ * This is the only zen entry point. It takes the exact mode, never a boolean.
  * A user in "total silence" or "alarms only" must get that mode back, not "priority".
  *
  * @note It is only intended for use in an Android environment.
  */
 void set_zen_mode(int zen_mode);
 
-/**
- * @brief Turn DND on (as "priority only") or off.
- *
- * Suitable for a game *requesting* DND. Not suitable for restoring a previous state; see
- * set_zen_mode().
- *
- * @param do_not_disturb True to enable DND mode, false to disable.
- * @note It is only intended for use in an Android environment.
- */
-void set_do_not_disturb(bool do_not_disturb);
+
 
 /**
  * @brief Monotonic milliseconds. The clock every Flux freshness decision is judged against.

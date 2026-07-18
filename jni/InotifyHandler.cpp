@@ -33,6 +33,11 @@
 extern void signal_daemon_update();
 extern void signal_daemon_stop();
 
+// Defined in Main.cpp, which owns the execution runtime. Declared rather than reached for
+// directly: the watcher's job is to notice that a file changed, not to know what a capability
+// generation is.
+extern void invalidate_execution_capabilities(const char *reason);
+
 enum WatchContext {
     WATCH_CONTEXT_GAMELIST,
     WATCH_CONTEXT_CONFIG,
@@ -51,6 +56,10 @@ void on_json_modified(const struct inotify_event *event, const std::string &path
     auto OnDeviceMitigationModified = [&](const std::string &path) -> void {
         LOGD_TAG("InotifyHandler", "Callback OnDeviceMitigationModified reached");
         device_mitigation_store.load_config(path);
+        // The mitigation set decides which capabilities Flux is willing to touch, so changing it
+        // changes what the last plan means. Anything the engine believes it verified was
+        // verified under the old set.
+        invalidate_execution_capabilities("device mitigation configuration changed");
     };
 
     auto OnConfigModified = [&](const std::string &path) -> void {
@@ -64,6 +73,11 @@ void on_json_modified(const struct inotify_event *event, const std::string &path
         // Apply new log level
         auto prefs = config_store.get_preferences();
         FluxLog::set_log_level(prefs.log_level);
+
+        // A configuration change invalidates the idempotency cache. The engine skips a write
+        // when it believes the value is already in place; that belief was formed under the old
+        // configuration, so the next cycle must write rather than assume.
+        invalidate_execution_capabilities("configuration changed");
     };
 
     auto OnModuleUpdateCreated = [&]() -> void {

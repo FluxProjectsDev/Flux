@@ -22,7 +22,7 @@
 
 #include <string>
 
-#define NOTIFY_TITLE "Flux Tweaks"
+#define NOTIFY_TITLE "Flux"
 #define LOG_TAG "FluxTweaks"
 
 #define CONFIG_DIR "/data/adb/.config/flux"

@@ -23,6 +23,7 @@
 #include <memory>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <thread>
 
@@ -30,12 +31,16 @@
 #include <sys/eventfd.h>
 
 #include "DeviceMitigationStore.hpp"
+#include <DeviceInfo.hpp>
 #include "FluxCLI.hpp"
 #include "FluxConfigStore.hpp"
 #include "InotifyHandler.hpp"
-#include "Profiler.hpp"
+#include "Write2File.hpp"
 
+#include <AndroidZenBackend.hpp>         // the single zen write entry point
 #include <DecisionAdapter.hpp>          // Flux V2 Decision Engine (pulls in ProfilePolicy.hpp types)
+#include <DevicePacks.hpp>              // attributed, gated per-SoC capability data
+#include <ExecutionRuntime.hpp>         // the single live profile-apply entry point
 #include <RuntimeSnapshotAssembler.hpp>  // normalization boundary: RawSnapshot -> RuntimeSnapshot
 #include <TelemetryRuntime.hpp>          // the single live telemetry authority
 
@@ -85,6 +90,17 @@ int synthesis_core_event_fd = -1;
 /// signals the daemon. Nothing else in the process may hold telemetry state.
 static std::unique_ptr<flux::telemetry::TelemetryRuntime> telemetry_runtime;
 
+/// The one and only live execution authority: intents -> plan -> verified writes. Constructed
+/// after telemetry (its zen backend reads through it) and destroyed before it.
+///
+/// This is the daemon's sole profile-apply entry point. Main.cpp routes events to it and reads
+/// state from it; it does not write device nodes, does not shell out, and does not decide.
+static std::unique_ptr<flux::execution::ExecutionRuntime> execution_runtime;
+
+/// The production zen backend, owned here because the runtime borrows it. Reads the live mode
+/// from telemetry rather than asking the system a second time.
+static std::unique_ptr<flux::execution::AndroidZenBackend> zen_backend;
+
 std::atomic<bool> daemon_stop_requested{false};
 
 /**
@@ -100,6 +116,27 @@ void signal_daemon_update() {
         ssize_t ret = write(fd, &val, sizeof(val));
         (void)ret; // Suppress unused warning
     }
+}
+
+/// Defined below, once the config stores and the runtime are in scope.
+static void install_tuning_from_config(int64_t now_ms);
+
+/**
+ * @brief Tell the execution runtime its capability assumptions may be stale.
+ *
+ * Called by the file watcher when configuration changes. The engine's idempotency cache skips a
+ * write when it believes the value is already in place; that belief was formed under the old
+ * configuration, so it has to be dropped rather than trusted. Also wakes the loop, so the
+ * re-apply happens now instead of on the next tick.
+ */
+void invalidate_execution_capabilities(const char *reason) {
+    if (!execution_runtime) return; // config can change before the runtime exists
+    LOGD("Execution capabilities invalidated: {}", reason);
+    // Re-migrate rather than merely invalidating: the change may have been to a setting the
+    // tuning captured (a governor, a mitigation, the master switch), and re-reading it is the
+    // only way the new value reaches the descriptors. set_tuning() bumps the generation itself.
+    install_tuning_from_config(flux_monotonic_ms());
+    signal_daemon_update();
 }
 
 /**
@@ -179,16 +216,10 @@ struct DaemonState {
     bool in_game_session = false;
     int focus_loss_count = 0;
 
-    /// True when we asked for DND on the game's behalf and have not yet put it back.
-    bool game_requested_dnd = false;
-
-    /// The user's zen mode before we touched it. A full enum, not a boolean: restoring
-    /// "total silence" or "alarms only" as "priority" silently changes the user's setting.
-    int prev_zen_mode = ZEN_MODE_OFF;
-
-    /// Set for one cycle after we restore zen, so we do not immediately re-read our own
-    /// write back into prev_zen_mode.
-    bool zen_just_restored = false;
+    // Zen state deliberately absent. The user's original mode, whether Flux is holding zen, and
+    // the "do not read our own write back" guard all live in the ZenController the execution
+    // runtime owns. Keeping a second copy here is what let the daemon and the controller
+    // disagree about what the user's zen mode had been.
 
     PIDTracker pid_tracker;
 };
@@ -204,6 +235,90 @@ static constexpr int DAEMON_TICK_MS = 1000;
 // Helper functions
 // ---------------------------------------------------------------------------
 
+
+/**
+ * @brief The SoC family, from the code the installer already worked out.
+ *
+ * Read once, at install time, into `soc_recognition` by customize.sh. Flux does not re-derive it
+ * at runtime: the installer's answer is the one the rest of the module (including the utility
+ * script) already agrees with, and a second detector could disagree with the first.
+ *
+ * SocFamily's numeric values are deliberately the same codes, so this is a checked cast rather
+ * than a mapping table that could drift.
+ */
+[[nodiscard]] static flux::execution::SocFamily read_soc_family() {
+    std::ifstream file(CONFIG_DIR "/soc_recognition");
+    if (!file.is_open()) return flux::execution::SocFamily::Unknown;
+
+    int code = 0;
+    if (!(file >> code)) return flux::execution::SocFamily::Unknown;
+
+    switch (static_cast<flux::execution::SocFamily>(code)) {
+        case flux::execution::SocFamily::MediaTek:
+        case flux::execution::SocFamily::Snapdragon:
+        case flux::execution::SocFamily::Exynos:
+        case flux::execution::SocFamily::Unisoc:
+        case flux::execution::SocFamily::Tensor:
+        case flux::execution::SocFamily::Tegra:
+        case flux::execution::SocFamily::Generic:
+            return static_cast<flux::execution::SocFamily>(code);
+        case flux::execution::SocFamily::Unknown:
+            break;
+    }
+    // An unrecognised code means the generic pack only. Guessing a family is the one mistake
+    // the whole descriptor design exists to prevent.
+    return flux::execution::SocFamily::Unknown;
+}
+
+/**
+ * @brief Build the V2 tuning from stored configuration, and install it.
+ *
+ * The migration boundary. Settings the legacy shell read from FLUX_* environment variables are
+ * turned into semantic inputs here — governor choices, suppressed capabilities, and the master
+ * gate — and handed to the runtime, which expresses them as descriptor values rather than as
+ * commands. Nothing on this path can execute anything.
+ */
+static void install_tuning_from_config(int64_t now_ms) {
+    if (!execution_runtime) return;
+
+    const auto prefs = config_store.get_preferences();
+    const auto governors = config_store.get_cpu_governor();
+
+    flux::execution::LegacyConfigInput input;
+    input.disable_tweaks = prefs.disable_tweaks;
+    input.balanced_governor = governors.balance;
+    input.powersave_governor = governors.powersave;
+
+    // The mitigation set is device knowledge plus a user opt-in; the migration decides what each
+    // item means. Main.cpp does not interpret them.
+    const auto items = device_mitigation_store.get_cached_mitigation_items(prefs.use_device_mitigation);
+    input.mitigation_items.insert(items.begin(), items.end());
+
+    auto tuning = flux::execution::migrate_legacy_config(input);
+    for (const auto &note : tuning.notes) {
+        LOGI("config: {} -> {} ({})", note.key,
+             flux::execution::migration_outcome_name(note.outcome), note.detail);
+    }
+    execution_runtime->set_tuning(std::move(tuning), now_ms);
+}
+
+/**
+ * @brief The profile mode to publish for the WebUI, from the *verified* runtime profile.
+ *
+ * Nothing is claimed before an apply verifies. Until then the published profile is the safe
+ * default rather than the one policy hopes to reach.
+ */
+[[nodiscard]] static FluxProfileMode profile_mode_from_target(flux::engine::TargetProfile profile,
+                                                              bool verified) {
+    if (!verified) return BALANCE_PROFILE;
+    switch (profile) {
+        case flux::engine::TargetProfile::Performance: return PERFORMANCE_PROFILE;
+        case flux::engine::TargetProfile::PerformanceLite: return PERFORMANCE_LITE_PROFILE;
+        case flux::engine::TargetProfile::Balanced: return BALANCE_PROFILE;
+        case flux::engine::TargetProfile::PowerSave: return POWERSAVE_PROFILE;
+    }
+    return BALANCE_PROFILE;
+}
 
 /**
  * @brief Returns the package name of the focused registered game, or empty if none.
@@ -259,72 +374,18 @@ static constexpr int DAEMON_TICK_MS = 1000;
 }
 
 /**
- * @brief Put the user's zen mode back exactly as we found it.
- *
- * Restores the full enum. Previously this called set_do_not_disturb(prev_dnd_state), where
- * prev_dnd_state was a bool — so a user who had been in "total silence" or "alarms only"
- * came back to "priority", a setting they never chose.
- */
-static void restore_zen_if_needed(DaemonState &state) {
-    if (!state.game_requested_dnd) return;
-
-    LOGI("Restoring zen mode to {}", zen_mode_to_dnd_arg(state.prev_zen_mode));
-    set_zen_mode(state.prev_zen_mode);
-    state.game_requested_dnd = false;
-    state.zen_just_restored  = true;
-}
-
-/**
  * @brief Handle the tracked game process exiting.
+ *
+ * Zen restoration is the execution runtime's job now: it holds the exact original mode and the
+ * only zen write path. This used to call restore_zen_if_needed(), a second zen writer living in
+ * Main.cpp beside the one in the runtime.
  */
 static void handle_game_exit(DaemonState &state) {
     LOGI("Game {} exited", state.active_package);
-    restore_zen_if_needed(state);
     state.active_package.clear();
     state.pid_tracker.invalidate();
     state.in_game_session  = false;
     state.focus_loss_count = 0;
-}
-
-/**
- * @brief Apply @p mode to the system.
- *
- * @return true when the profile was applied. A profile is never reported as active unless
- *         the apply step actually ran; the caller records the outcome in the transition
- *         history either way.
- */
-[[nodiscard]] static bool apply_profile(
-    FluxProfileMode mode, const std::string &package, pid_t pid, std::string &error_out
-) {
-    try {
-        switch (mode) {
-            case PERFORMANCE_PROFILE:
-                if (pid == 0) {
-                    error_out = "no PID for " + package;
-                    return false;
-                }
-                apply_performance_profile(false, package, pid);
-                return true;
-
-            case PERFORMANCE_LITE_PROFILE:
-                if (pid == 0) {
-                    error_out = "no PID for " + package;
-                    return false;
-                }
-                apply_performance_lite_profile(package, pid);
-                return true;
-
-            case BALANCE_PROFILE: apply_balance_profile(); return true;
-            case POWERSAVE_PROFILE: apply_powersave_profile(); return true;
-            case PERFCOMMON: run_perfcommon(); return true;
-        }
-    } catch (const std::exception &e) {
-        error_out = e.what();
-        return false;
-    }
-
-    error_out = "unknown profile mode";
-    return false;
 }
 
 /**
@@ -369,21 +430,11 @@ static void evaluate_and_apply(DaemonState &state, int64_t now_ms) {
             }
         }
 
-        // Track the user's own zen preference while we are not overriding it.
-        if (!state.game_requested_dnd && snapshot->zen_available) {
-            if (state.zen_just_restored) {
-                state.zen_just_restored = false; // do not read our own write back
-            } else {
-                state.prev_zen_mode = snapshot->zen_mode;
-            }
-        }
-
         if (state.active_package.empty()) {
             state.active_package = get_active_game(*snapshot, game_registry);
             if (!state.active_package.empty()) {
                 state.in_game_session = true;
-                LOGI("Game session started: {} (zen before: {})", state.active_package,
-                     zen_mode_to_dnd_arg(state.prev_zen_mode));
+                LOGI("Game session started: {}", state.active_package);
             }
         }
     }
@@ -425,6 +476,12 @@ static void evaluate_and_apply(DaemonState &state, int64_t now_ms) {
     const FluxProfileMode previous = state.policy_state.current;
     const PolicyDecision decision  = state.decision_service.decide(inputs, state.policy_state, now_ms);
 
+    // The full V2 decision behind the adapter's summary. The execution runtime consumes this
+    // rather than the FluxProfileMode: the mode has already thrown away the reason, the
+    // priority and the safety constraints, and the intent mapper needs all three to know
+    // whether a Balanced ask is a preference or a thermal response.
+    const flux::engine::Decision &engine_decision = state.decision_service.last_decision();
+
     // --- Act ----------------------------------------------------------------
     const bool in_perf_tier =
         (decision.profile == PERFORMANCE_PROFILE || decision.profile == PERFORMANCE_LITE_PROFILE);
@@ -445,31 +502,54 @@ static void evaluate_and_apply(DaemonState &state, int64_t now_ms) {
         }
     }
 
-    if (!decision.changed) return;
+    // --- Detect drift -------------------------------------------------------
+    // Something outside Flux may have moved a node Flux verified: another module, a vendor
+    // service, a user with a terminal. The engine's idempotency cache would otherwise skip the
+    // rewrite forever, because it still believes the value is in place. Re-reading only what
+    // Flux actually verified keeps this to a handful of reads per tick.
+    if (const auto drifted = execution_runtime->poll_external_mutation(now_ms); !drifted.empty()) {
+        LOGW("{} capability(ies) changed outside Flux; re-applying", drifted.size());
+    }
 
-    std::string apply_error;
-    const bool applied = apply_profile(decision.profile, state.active_package, game_pid, apply_error);
+    // --- Apply --------------------------------------------------------------
+    // The single live apply path. Everything from here — intent mapping, capability probing,
+    // planning, validation, writing, verification, rollback and zen — happens inside the
+    // execution runtime. Main.cpp hands it a decision and a session, and reads back what
+    // actually happened. It does not write, and it does not interpret.
+    //
+    // Note this runs even when !decision.changed: the runtime does its own coalescing, and it
+    // is the only thing that knows whether the device still holds what was last verified. An
+    // unchanged decision against a device that drifted is real work; skipping it here — as the
+    // legacy path did — is how a profile silently stopped being applied.
+    flux::execution::SessionContext session;
+    session.in_session = state.in_game_session;
+    session.package    = state.active_package;
+    session.pid        = static_cast<int>(game_pid);
+    session.uid        = (snapshot && snapshot->focused_package == state.active_package)
+                             ? snapshot->focused_uid
+                             : 0;
+    session.wants_zen  = in_perf_tier && game_entry && game_entry->enable_dnd;
+    session.desired_zen_mode = ZEN_MODE_IMPORTANT_INTERRUPTIONS;
+
+    const auto cycle = execution_runtime->on_decision(engine_decision, session, now_ms);
+    if (cycle.coalesced) return;
+
+    const auto &runtime_state = execution_runtime->state();
+    const bool applied = cycle.apply.verified_active;
 
     if (!applied) {
-        // Do not claim a profile is active when applying it failed. Roll the recorded state
-        // back so the next evaluation retries rather than believing the job is done.
-        LOGE("Failed to apply {} profile: {}", profile_mode_string(decision.profile), apply_error);
+        // Do not claim a profile is active when applying it did not verify. Roll the recorded
+        // policy state back so the next evaluation retries rather than believing the job is done.
+        LOGE("Profile {} not verified ({}): {}", profile_mode_string(decision.profile),
+             flux::execution::apply_state_name(runtime_state.state()), cycle.apply.message);
         state.policy_state.current = previous;
-    } else {
-        LOGI("Profile {} -> {} ({})", profile_mode_string(previous),
-             profile_mode_string(decision.profile), transition_reason_string(decision.reason));
+    } else if (decision.changed) {
+        LOGI("Profile {} -> {} ({}) [{}]", profile_mode_string(previous),
+             profile_mode_string(decision.profile), transition_reason_string(decision.reason),
+             flux::execution::apply_state_name(runtime_state.state()));
     }
 
-    // --- Zen ----------------------------------------------------------------
-    if (applied) {
-        const bool wants_dnd = in_perf_tier && game_entry && game_entry->enable_dnd;
-        if (wants_dnd && !state.game_requested_dnd) {
-            state.game_requested_dnd = true;
-            set_do_not_disturb(true);
-        } else if (!in_perf_tier) {
-            restore_zen_if_needed(state);
-        }
-    }
+    if (!decision.changed && applied) return; // nothing transitioned; nothing to record
 
     // --- Record -------------------------------------------------------------
     TransitionRecord record;
@@ -480,7 +560,7 @@ static void evaluate_and_apply(DaemonState &state, int64_t now_ms) {
     record.package      = state.active_package;
     record.health       = health;
     record.applied      = applied;
-    record.apply_error  = apply_error;
+    record.apply_error  = applied ? std::string() : cycle.apply.message;
     if (snapshot && snapshot->has_thermal()) {
         record.thermal_headroom = snapshot->thermal_headroom;
         record.thermal_valid    = true;
@@ -495,8 +575,6 @@ static void evaluate_and_apply(DaemonState &state, int64_t now_ms) {
 static void flux_main_daemon() {
     DaemonState state;
     pthread_setname_np(pthread_self(), "MainThread");
-
-    run_perfcommon();
 
     // Wake the loop the moment a tracked process dies.
     state.pid_tracker.set_callback([](pid_t) { signal_daemon_update(); });
@@ -538,8 +616,14 @@ static void flux_main_daemon() {
         evaluate_and_apply(state, flux_monotonic_ms());
     }
 
-    // Leave the user's zen mode as we found it, whatever happens.
-    restore_zen_if_needed(state);
+    // Put the device back exactly as we found it — values and zen — whatever happens. This is a
+    // policy decision, so it is made here and not inside the runtime's shutdown().
+    if (execution_runtime) {
+        const auto restored = execution_runtime->restore_all("daemon_stopping", flux_monotonic_ms());
+        if (!restored.verified_active) {
+            LOGW("Could not fully restore original values on exit: {}", restored.message);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -621,12 +705,61 @@ int run_daemon() {
         return EXIT_FAILURE;
     }
 
-    // The profiler reads telemetry through the same authority instead of a cache of its own.
-    set_telemetry_provider([]() -> std::optional<flux::telemetry::RawSnapshot> {
-        const auto published = telemetry_runtime->get();
-        if (!published) return std::nullopt;
-        return published->snapshot;
-    });
+    // --- The live execution runtime ----------------------------------------
+    // Constructed after telemetry, because the zen backend reads the live mode through it, and
+    // destroyed before it. This is the process's only ExecutionEngine and only NodeBackend.
+    {
+        zen_backend = std::make_unique<flux::execution::AndroidZenBackend>(
+            []() -> std::optional<int> {
+                // The user's current zen mode, from the one telemetry authority. Never a
+                // subprocess: SynthesisCore already publishes this, and asking the system a
+                // second time would be a second source of truth for one value.
+                const auto published = telemetry_runtime->get();
+                if (!published || !published->snapshot.zen_available) return std::nullopt;
+                return published->snapshot.zen_mode;
+            },
+            [](int mode) {
+                set_zen_mode(mode);
+                return true;
+            });
+
+        // The SoC selects which packs apply. Every vendor pack ships gated: being selected does
+        // not make it executable, and nothing here promotes it.
+        const flux::execution::SocFamily soc = read_soc_family();
+        const flux::execution::DeviceIdentity identity{soc, DeviceInfo::get_soc_model()};
+
+        // packs_for() already puts the generic pack first: it is the fallback every device
+        // gets, and the vendor pack (if any) is added on top of it.
+        auto packs = flux::device::packs_for(soc);
+
+        execution_runtime = std::make_unique<flux::execution::ExecutionRuntime>(
+            std::move(packs), identity, flux::execution::PathPolicy{}, zen_backend.get());
+
+        // Publish the verified state for the WebUI and the CLI. The profile written here is the
+        // *verified* one — what the device is actually in — not what policy asked for.
+        execution_runtime->set_status_publisher(
+            [](const flux::execution::RuntimeProfileState &runtime_state,
+               const flux::execution::SessionContext &session) {
+                write2file(PROFILE_MODE,
+                           static_cast<int>(profile_mode_from_target(
+                               runtime_state.verified_profile(), runtime_state.has_verified_profile())),
+                           "\n");
+                if (session.in_session && !session.package.empty()) {
+                    write2file(GAME_INFO, session.package, " ", session.pid, " ", session.uid, "\n");
+                } else {
+                    write2file(GAME_INFO, "NULL 0 0\n");
+                }
+            });
+
+        // Migrate stored configuration before the first cycle, so the very first apply already
+        // honours the user's settings rather than applying defaults and correcting itself.
+        install_tuning_from_config(flux_monotonic_ms());
+
+        LOGI("Execution runtime up: soc={} tweaks={} (vendor capabilities gated pending "
+             "hardware validation)",
+             flux::execution::soc_family_name(soc),
+             execution_runtime->tweaks_enabled() ? "enabled" : "disabled by configuration");
+    }
 
     // Give SynthesisCore a grace period to come up, but do not make Flux's existence
     // conditional on it.
@@ -667,16 +800,15 @@ int run_daemon() {
         return EXIT_FAILURE;
     }
 
-    LOGI("Flux Tweaks daemon started");
+    LOGI("Flux daemon started");
     set_module_description_status("\xF0\x9F\x98\x8B Tweaks applied successfully");
     flux_main_daemon();
 
-    LOGW("Flux Tweaks daemon exited");
+    LOGW("Flux daemon exited");
 
     // Stop the watcher and join its worker before the wake descriptor it signals is closed.
     if (telemetry_runtime) {
         telemetry_runtime->stop();
-        set_telemetry_provider(nullptr); // no reads after the authority is gone
     }
 
     if (synthesis_core_event_fd >= 0) {

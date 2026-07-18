@@ -62,7 +62,7 @@ int version_handler(const std::vector<std::string> &args) {
     (void)args;
 
     std::string module_version = get_module_version();
-    std::cout << "Flux Tweaks " << module_version << std::endl;
+    std::cout << "Flux " << module_version << std::endl;
     std::cout << "Built on " << __TIME__ << " " << __DATE__ << std::endl;
     return EXIT_SUCCESS;
 }
@@ -109,7 +109,7 @@ int daemon_handler(const std::vector<std::string> &args) {
 std::vector<CliCommand> commands = {
     {
         "daemon",
-        "Start Flux Tweaks daemon",
+        "Start Flux daemon",
         "daemon",
         0,
         0,
@@ -143,7 +143,7 @@ std::vector<CliCommand> commands = {
 // clang-format on
 
 void cli_usage(const char *program_name) {
-    std::cout << "Flux Tweaks CLI" << std::endl << std::endl;
+    std::cout << "Flux CLI" << std::endl << std::endl;
     std::cout << "Usage: " << program_name << " <COMMAND>" << std::endl << std::endl;
     std::cout << "Commands:" << std::endl;
 

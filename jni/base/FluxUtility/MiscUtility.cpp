@@ -67,14 +67,6 @@ void set_zen_mode(int zen_mode) {
     }
 }
 
-void set_do_not_disturb(bool do_not_disturb) {
-    // Retained for the "a game asked for DND" path, where priority mode is what we want.
-    // Restoring the user's *previous* setting must go through set_zen_mode() instead:
-    // this function cannot express total-silence or alarms-only, and using it to restore
-    // silently rewrote those two modes to "priority".
-    set_zen_mode(do_not_disturb ? ZEN_MODE_IMPORTANT_INTERRUPTIONS : ZEN_MODE_OFF);
-}
-
 void notify(const char *message) {
     pid_t pid = fork();
 

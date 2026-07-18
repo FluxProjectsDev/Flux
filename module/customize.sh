@@ -157,7 +157,6 @@ extract "$ZIPFILE" 'uninstall.sh' "$MODPATH"
 extract "$ZIPFILE" 'action.sh' "$MODPATH"
 extract "$ZIPFILE" 'cleanup.sh' "$MODPATH"
 extract "$ZIPFILE" 'synthesiscore.apk' "$MODPATH"
-extract "$ZIPFILE" 'system/bin/flux_profiler' "$MODPATH"
 extract "$ZIPFILE" 'system/bin/flux_utility' "$MODPATH"
 cp "$MODPATH/module.prop" "$MODPATH/module.prop.orig"
 
@@ -188,8 +187,13 @@ if [ "$KSU" = "true" ] || [ "$APATCH" = "true" ]; then
 		[ -d "$dir" ] && {
 			ui_print "- Creating symlink in $dir"
 			ln -sf "$BIN_PATH/fluxd" "$dir/fluxd"
-			ln -sf "$BIN_PATH/flux_profiler" "$dir/flux_profiler"
 			ln -sf "$BIN_PATH/flux_utility" "$dir/flux_utility"
+
+			# Upgrading from a pre-V2 install leaves a flux_profiler symlink here. These live
+			# outside the module directory, so replacing the module does not remove them: the
+			# link survives, dangling, and anyone who runs it gets a confusing failure instead
+			# of "command not found". The shell applier is gone; its symlink goes with it.
+			rm -f "$dir/flux_profiler"
 		}
 	done
 fi
