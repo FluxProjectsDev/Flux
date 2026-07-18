@@ -26,8 +26,9 @@
 # copying it into module/assets/ would create a second one to forget to update.
 #
 # Same rules as scripts/render-banner.py, for the same reasons: geometry this repository owns
-# rather than a downloaded icon set, deterministic output, no font and no network. The glyphs are
-# drawn from explicit coordinates so the SVG and the WebP cannot drift.
+# rather than a downloaded icon set, reproducible output, no font and no network. The glyphs are
+# drawn from explicit coordinates so the SVG and the WebP cannot drift. --check compares rasters
+# by decoded pixel content, because WebP bytes are not stable across libwebp versions.
 #
 # Colours are the WebUI's Material 3 dark tokens (webui/src/assets/base.css). That file is the
 # source of truth; the values are restated here because a .css cannot be imported from Python.
@@ -141,6 +142,15 @@ def render_svg(name, spec, path):
         fh.write(svg)
 
 
+
+
+
+# The comparison lives in scripts/asset_check.py, shared with the other generator. See that file
+# for why --check compares decoded pixels rather than encoded bytes.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from asset_check import images_match as _images_match, text_match as _text_match  # noqa: E402
+
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(REPO_ROOT, "module", "assets", "icons")
 
@@ -176,15 +186,16 @@ def main():
                     sys.stderr.write("FAIL: %s is not committed\n" % fn)
                     ok = False
                     continue
-                with open(committed, "rb") as a, open(generated, "rb") as b:
-                    if a.read() != b.read():
-                        sys.stderr.write(
-                            "FAIL: %s differs from what render-icons.py generates. "
-                            "Re-run: python3 scripts/render-icons.py\n" % fn
-                        )
-                        ok = False
-                    else:
-                        print("OK: %s matches its generator" % fn)
+                compare = _text_match if ext == "svg" else _images_match
+                same, why = compare(committed, generated)
+                if same:
+                    print("OK: %s matches its generator" % fn)
+                else:
+                    sys.stderr.write(
+                        "FAIL: %s differs from what render-icons.py generates (%s). "
+                        "Re-run: python3 scripts/render-icons.py\n" % (fn, why)
+                    )
+                    ok = False
         return 0 if ok else 1
 
     for p in generate(OUT_DIR):

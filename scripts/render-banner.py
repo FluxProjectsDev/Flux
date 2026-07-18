@@ -34,9 +34,10 @@
 # Colours are the WebUI's own Material 3 dark tokens (webui/src/assets/base.css), so the banner a
 # module manager shows and the UI the user opens are visibly the same product.
 #
-# Determinism: no randomness, no time, no font metrics, fixed supersample factor. Two runs on
-# two machines produce byte-identical output, which is what lets CI assert the committed WebP is
-# the one this script generates.
+# Determinism: no randomness, no time, no font metrics in the geometry, fixed supersample factor.
+# The GEOMETRY is fully reproducible; the WebP *encoding* is not byte-stable across libwebp
+# versions, so --check compares the raster by decoded pixel content and the SVG byte for byte.
+# See _images_match for why that is the property worth asserting.
 #
 # Usage: python3 scripts/render-banner.py [--check]
 #   --check  regenerate into a temp dir and diff against the committed files; do not write.
@@ -426,6 +427,15 @@ def render_svg(path):
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────
+
+
+
+# The comparison lives in scripts/asset_check.py, shared with the other generator. See that file
+# for why --check compares decoded pixels rather than encoded bytes.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from asset_check import images_match as _images_match, text_match as _text_match  # noqa: E402
+
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(REPO_ROOT, "module", "assets", "branding")
 
@@ -446,21 +456,24 @@ def main():
         render_svg(svg_tmp)
         render_raster(webp_tmp)
         ok = True
-        for name, generated in (("banner.svg", svg_tmp), ("banner.webp", webp_tmp)):
+        for name, generated, compare in (
+            ("banner.svg", svg_tmp, _text_match),
+            ("banner.webp", webp_tmp, _images_match),
+        ):
             committed = os.path.join(OUT_DIR, name)
             if not os.path.exists(committed):
                 sys.stderr.write("FAIL: %s is not committed\n" % name)
                 ok = False
                 continue
-            with open(committed, "rb") as a, open(generated, "rb") as b:
-                if a.read() != b.read():
-                    sys.stderr.write(
-                        "FAIL: %s differs from what render-banner.py generates. "
-                        "Re-run: python3 scripts/render-banner.py\n" % name
-                    )
-                    ok = False
-                else:
-                    print("OK: %s matches its generator" % name)
+            same, why = compare(committed, generated)
+            if same:
+                print("OK: %s matches its generator" % name)
+            else:
+                sys.stderr.write(
+                    "FAIL: %s differs from what render-banner.py generates (%s). "
+                    "Re-run: python3 scripts/render-banner.py\n" % (name, why)
+                )
+                ok = False
         return 0 if ok else 1
 
     os.makedirs(OUT_DIR, exist_ok=True)

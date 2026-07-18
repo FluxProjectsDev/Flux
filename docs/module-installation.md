@@ -38,8 +38,11 @@ python3 scripts/render-icons.py      # module/assets/icons/{action,donate}.{svg,
 ```
 
 Each script also takes `--check`, which regenerates into a temp directory and
-byte-compares against what is committed. CI runs both, so the packaged artwork
-cannot drift from its source. `module/assets/` is the editable source tree and is
+compares against what is committed — rasters by decoded pixel content, SVG byte
+for byte. Pixels rather than bytes because WebP encoding is not stable across
+libwebp versions, and a check that goes red on a dependency upgrade while the
+artwork is unchanged is one people learn to silence. CI runs both, so the packaged
+artwork cannot drift from its source. `module/assets/` is the editable source tree and is
 **not** packaged; the build copies each raster to the flat module-root path its
 metadata key names.
 

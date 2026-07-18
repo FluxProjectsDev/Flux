@@ -474,6 +474,9 @@ PMEOF
 
 	(
 		# A minimal PATH containing only the stubs plus the real coreutils this script uses.
+		# Subshell-local is the intent, not an oversight: the stub `am` and `pm` must not leak
+		# into the rest of this script, or a later fixture would silently exercise them.
+		# shellcheck disable=SC2030
 		export PATH="${ar}/bin:/usr/bin:/bin"
 		for assign in "$@"; do export "${assign?}"; done
 		sh "${ar}/mod/action.sh"
@@ -532,7 +535,8 @@ cp module/action.sh "${AR_NOAM}/mod/action.sh"
 sed "s|^OFFICIAL_DONATION_URL=.*|OFFICIAL_DONATION_URL=\"${DONATE_URL}\"|" \
 	module/installer/config.sh >"${AR_NOAM}/mod/installer/config.sh"
 (
-	# No `am` on PATH at all.
+	# No `am` on PATH at all. Scoped to this subshell for the same reason as above.
+	# shellcheck disable=SC2031
 	export PATH="${AR_NOAM}/bin:/usr/bin:/bin"
 	export KSU=true
 	sh "${AR_NOAM}/mod/action.sh"
@@ -553,6 +557,7 @@ if grep -qE '\beval\b' <<<"${ACTION_CODE}"; then
 fi
 # Every URL in the script must be a literal https:// constant or a reference to the config file's
 # variables. A URL assembled from anything else is the thing this check exists to prevent.
+# shellcheck disable=SC2016  # the literal '$' is the pattern: we are matching shell source text
 BAD_URLS="$(grep -oE '(-d|open_url) +"?\$[A-Za-z_]+' <<<"${ACTION_CODE}" |
 	grep -vE 'OFFICIAL_DONATION_URL|FLUX_REPO_URL|\$1' || true)"
 if [ -n "${BAD_URLS}" ]; then
