@@ -19,7 +19,7 @@
 # schema_provided falls outside [schema_min, schema_max]. It never silently falls back to a
 # "latest" build.
 
-repository=elyraos-dev/SynthesisCore
+repository=FluxProjectsDev/SynthesisCore
 version=v1.0.1
 commit=4d82d8516c95fa6441ba942740a3f1844d853f4b
 asset=SynthesisCore-v1.0.1.apk

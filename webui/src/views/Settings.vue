@@ -368,7 +368,7 @@ const openLogLvlView = () => router.push('/settings/log_level')
 const openDisableTweaksView = () => router.push('/settings/disable_tweaks')
 const createShortcut = () => KernelSU.createShortcut()
 
-const openGithub = () => KernelSU.openWebsite('https://github.com/FebriCahyaa/Flux')
+const openGithub = () => KernelSU.openWebsite('https://github.com/FluxProjectsDev/Flux')
 const openTelegram = () => KernelSU.openWebsite('https://t.me/c/3901105851/3')
 
 const openExportModal = () => {
