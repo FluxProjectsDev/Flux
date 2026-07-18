@@ -1,3 +1,4 @@
+#!/system/bin/sh
 #
 # Copyright (C) 2024-2026 Rem01Gaming
 # Copyright (C) 2024-2026 FebriCahyaa
@@ -17,250 +18,105 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+# Flux installer entry point.
+#
+# This file is deliberately thin. It is the portable contract every module manager understands —
+# it sequences the stages and does nothing else. All logic lives in installer/, where it can be
+# read, checksummed and tested on its own.
+#
+# The stage numbering is honest: [n/8] advances when a stage starts, so it can never run ahead of
+# the work, and every [OK] in this run follows a check that actually executed. There are no
+# sleeps, no spinners and no progress animation anywhere in the installer — a flash is fast, and
+# padding it to look busy would be the one thing here that is purely a lie.
+#
+# Failure handling is structural rather than conventional: flux_abort does not return, so the
+# summary at the end is unreachable after a fatal error. "Success cannot print after a failure"
+# is not a rule someone has to remember to follow.
 
-# shellcheck disable=SC1091,SC2034,SC2317
+# shellcheck disable=SC1091  # helpers are extracted from the ZIP at run time
+# shellcheck disable=SC2034  # SKIPUNZIP is read by the module manager, not by this script
 SKIPUNZIP=1
-SOC=0
 
-MODULE_CONFIG="/data/adb/.config/flux"
-
-make_node() {
-	[ ! -f "$2" ] && echo "$1" >"$2"
-}
-
-make_dir() {
-	[ ! -d "$1" ] && mkdir -p "$1"
-}
-
-abort_unsupported_arch() {
+# ── Bootstrap ────────────────────────────────────────────────────────────────
+# verify.sh is the trust root: it verifies every installer helper against its packaged digest
+# before sourcing it. See that file for what this does and does not guarantee.
+ui_print "- Loading Flux installer"
+unzip -o "$ZIPFILE" 'verify.sh' -d "$TMPDIR" >/dev/null 2>&1
+if [ ! -s "$TMPDIR/verify.sh" ]; then
 	ui_print "*********************************************************"
-	ui_print "! Unsupported Architecture: $ARCH"
-	ui_print "! Your CPU architecture is not supported by Flux Tweaks."
+	ui_print "! Unable to extract verify.sh"
+	ui_print "! The package is corrupted. Please re-download Flux."
 	abort "*********************************************************"
-}
+fi
+. "$TMPDIR/verify.sh"
+flux_bootstrap_installer
 
-abort_corrupted() {
-	ui_print "*********************************************************"
-	ui_print "! Unable to extract verify.sh!"
-	ui_print "! Installation aborted. The module may be corrupted."
-	ui_print "! Please re-download and try again."
-	abort "*********************************************************"
-}
+flux_ui_init
+flux_print_banner
 
-abort_gamelist_error() {
-	ui_print "*********************************************************"
-	ui_print "! Failed to initialize gamelist!"
-	ui_print "! Installation aborted."
-	abort "*********************************************************"
-}
-
-abort_android_version() {
-	ui_print "*********************************************************"
-	ui_print "! Your Android Version is not supported!"
-	ui_print "! Please use Android 9 (Pie) or higher."
-	ui_print "! Installation aborted."
-	abort "*********************************************************"
-}
-
-soc_recognition_extra() {
-	[ -d /sys/class/kgsl/kgsl-3d0/devfreq ] && {
-		SOC=2
-		ui_print "- Implementing tweaks for Snapdragon"
-		return 0
-	}
-
-	[ -d /sys/devices/platform/kgsl-2d0.0/kgsl ] && {
-		SOC=2
-		ui_print "- Implementing tweaks for Snapdragon"
-		return 0
-	}
-
-	[ -d /sys/kernel/ged/hal ] && {
-		SOC=1
-		ui_print "- Implementing tweaks for MediaTek"
-		return 0
-	}
-
-	[ -d /sys/kernel/tegra_gpu ] && {
-		SOC=6
-		ui_print "- Implementing tweaks for Nvidia Tegra"
-		return 0
-	}
-
-	return 1
-}
-
-get_soc_getprop() {
-	SOC_PROP="
-ro.board.platform
-ro.soc.model
-ro.hardware
-ro.chipname
-ro.hardware.chipname
-ro.vendor.soc.model.external_name
-ro.vendor.qti.soc_name
-ro.vendor.soc.model.part_name
-ro.vendor.soc.model
-"
-
-	for prop in $SOC_PROP; do
-		getprop "$prop"
-	done
-}
-
-recognize_soc() {
-	case "$1" in
-	*mt* | *MT*) SOC=1 ;;
-	*sm* | *qcom* | *SM* | *QCOM* | *Qualcomm*) SOC=2 ;;
-	*exynos* | *Exynos* | *EXYNOS* | *universal* | *samsung* | *erd* | *s5e*) SOC=3 ;;
-	*Unisoc* | *unisoc* | *ums* | *UNISOC* | *sp* | *SC*) SOC=4 ;;
-	*gs* | *Tensor* | *tensor*) SOC=5 ;;
-	*kirin*) SOC=7 ;;
-	esac
-
-	case "$SOC" in
-	1) ui_print "- Implementing tweaks for MediaTek" ;;
-	2) ui_print "- Implementing tweaks for Snapdragon" ;;
-	3) ui_print "- Implementing tweaks for Exynos" ;;
-	4) ui_print "- Implementing tweaks for Unisoc" ;;
-	5) ui_print "- Implementing tweaks for Google Tensor" ;;
-	6) ui_print "- Implementing tweaks for Nvidia Tegra" ;;
-	7) ui_print "- Implementing tweaks for Kirin" ;;
-	0) return 1 ;;
-	esac
-}
-
-generate_gamelist() {
-  extract "$ZIPFILE" 'gamelist.txt' "$MODULE_CONFIG"
-  "$MODPATH/system/bin/fluxd" setup_gamelist "$MODULE_CONFIG/gamelist.txt"
-  exit_code=$?
-
-  rm -f "$MODULE_CONFIG/gamelist.txt"
-  [ $exit_code -gt 0 ] && abort_gamelist_error
-}
-
-# Check Android version
-[ "$API" -lt 28 ] && abort_android_version
-
-# Flashable integrity checkup
-ui_print "- Extracting verify.sh"
-unzip -o "$ZIPFILE" 'verify.sh' -d "$TMPDIR" >&2
-[ ! -f "$TMPDIR/verify.sh" ] && abort_corrupted
-source "$TMPDIR/verify.sh"
-
-# Extract module files
-ui_print "- Extracting module files"
-extract "$ZIPFILE" 'module.prop' "$MODPATH"
-extract "$ZIPFILE" 'banner.webp' "$MODPATH"
-extract "$ZIPFILE" 'service.sh' "$MODPATH"
-extract "$ZIPFILE" 'uninstall.sh' "$MODPATH"
-extract "$ZIPFILE" 'action.sh' "$MODPATH"
-extract "$ZIPFILE" 'cleanup.sh' "$MODPATH"
-extract "$ZIPFILE" 'synthesiscore.apk' "$MODPATH"
-extract "$ZIPFILE" 'system/bin/flux_utility' "$MODPATH"
-cp "$MODPATH/module.prop" "$MODPATH/module.prop.orig"
-
-# Target architecture
-case $ARCH in
-"arm64") ARCH_TMP="arm64-v8a" ;;
-"arm") ARCH_TMP="armeabi-v7a" ;;
-*) abort_unsupported_arch ;;
+# ── [1/8] Package integrity ──────────────────────────────────────────────────
+flux_step_begin "Package integrity"
+flux_integrity_init || flux_abort "Cannot create the verification work directory" \
+	"TMPDIR is not writable."
+flux_step_ok "Installer components verified against their published checksums"
+_ub_state="$(flux_check_update_binary)"
+case "${_ub_state}" in
+verified) flux_step_ok "Installer stub checksum verified" ;;
+unsigned) flux_info "Installer stub has no checksum (installed via the manager's own updater)" ;;
+*) flux_info "No installer stub in this package" ;;
 esac
 
-# Extract executables
-extract "$ZIPFILE" "libs/$ARCH_TMP/fluxd" "$TMPDIR"
-cp "$TMPDIR"/libs/"$ARCH_TMP"/* "$MODPATH/system/bin"
-rm -rf "$TMPDIR/libs"
-
-# Skip mountify
-touch "$MODPATH/skip_mountify"
-
-if [ "$KSU" = "true" ] || [ "$APATCH" = "true" ]; then
-  ui_print "- KSU/AP Detected, skipping module mount (skip_mount)"
-	rm "$MODPATH/action.sh"
-	touch "$MODPATH/skip_mount"
-
-	# symlink ourselves on $PATH
-	manager_paths="/data/adb/ap/bin /data/adb/ksu/bin"
-	BIN_PATH="/data/adb/modules/flux/system/bin"
-	for dir in $manager_paths; do
-		[ -d "$dir" ] && {
-			ui_print "- Creating symlink in $dir"
-			ln -sf "$BIN_PATH/fluxd" "$dir/fluxd"
-			ln -sf "$BIN_PATH/flux_utility" "$dir/flux_utility"
-
-			# Upgrading from a pre-V2 install leaves a flux_profiler symlink here. These live
-			# outside the module directory, so replacing the module does not remove them: the
-			# link survives, dangling, and anyone who runs it gets a confusing failure instead
-			# of "command not found". The shell applier is gone; its symlink goes with it.
-			rm -f "$dir/flux_profiler"
-		}
-	done
-fi
-
-# Extract webroot
-ui_print "- Extracting webroot"
-unzip -o "$ZIPFILE" "webroot/*" -d "$MODPATH" -x "*.sha256" >&2
-
-# Mitigate root detection
-[ -d /data/flux ] && rm -rf /data/flux
-[ -f /data/local/tmp/flux_logo.png ] && rm -f /data/local/tmp/flux_logo.png
-
-# Set configs
-ui_print "- Flux Tweaks configuration setup"
-make_dir "$MODULE_CONFIG"
-unzip -o "$ZIPFILE" "config/*" -d "$MODULE_CONFIG" -x "*.sha256" >&2
-mv "$MODULE_CONFIG/config/"* "$MODULE_CONFIG/"
-rm -rf "$MODULE_CONFIG/config"
-
-# Permission settings
-ui_print "- Permission setup"
-set_perm_recursive "$MODPATH/system/bin" 0 0 0755 0755
-
-# Gamelist setup
-if [ ! -f "$MODULE_CONFIG/gamelist.json" ]; then
-  ui_print "- Initializing Gamelist JSON..."
-  generate_gamelist
+# ── [2/8] Installation environment ───────────────────────────────────────────
+flux_step_begin "Installation environment"
+flux_detect_environment
+flux_resolve_abi
+flux_report_environment
+if [ "${FLUX_MANAGER}" = "unknown" ]; then
+	# Reached only when the module contract check in flux_detect_environment passed, so the
+	# variables and functions the installer needs are all present. Proceeding is safe; guessing
+	# manager-private paths would not be, and nothing below does.
+	flux_step_warn "Unrecognised module manager; continuing on the standard module contract"
 else
-  "$MODPATH/system/bin/fluxd" check_gamelist
-  [ $? -gt 0 ] && {
-    ui_print "! Gamelist JSON is malformed, regenerating..."
-    generate_gamelist
-  }
+	flux_step_ok "Module manager recognised"
 fi
 
-# SOC CODE:
-# 1 = MediaTek
-# 2 = Qualcomm Snapdragon
-# 3 = Exynos
-# 4 = Unisoc
-# 5 = Google Tensor
-# 6 = Nvidia Tegra
-# 7 = Kirin
+# ── [3/8] Architecture and Android compatibility ─────────────────────────────
+flux_step_begin "Architecture and Android compatibility"
+flux_check_android_version
+flux_step_ok "Android API ${FLUX_API} meets the minimum (${FLUX_MIN_API})"
+flux_step_ok "Architecture ${FLUX_ABI} is supported (payload: ${FLUX_ABI_DIR})"
 
-# Recognize Chipset
-soc_recognition_extra
-[ $SOC -eq 0 ] && recognize_soc "$(</proc/device-tree/model)"
-[ $SOC -eq 0 ] && recognize_soc "$(get_soc_getprop)"
-[ $SOC -eq 0 ] && recognize_soc "$(grep -E "Hardware|Processor" /proc/cpuinfo | uniq | cut -d ':' -f 2 | sed 's/^[ \t]*//')"
-[ $SOC -eq 0 ] && recognize_soc "$(grep "model\sname" /proc/cpuinfo | uniq | cut -d ':' -f 2 | sed 's/^[ \t]*//')"
-[ $SOC -eq 0 ] && {
-	ui_print "! Unknown SoC, skipping some tweaks"
-	ui_print "! If you think this is wrong, please report to maintainer"
-}
+# ── [4/8] Existing installation and configuration ────────────────────────────
+flux_step_begin "Existing installation and configuration"
+flux_migrate_existing
 
-echo $SOC >"$MODULE_CONFIG/soc_recognition"
+# ── [5/8] Runtime and SynthesisCore payload ──────────────────────────────────
+flux_step_begin "Runtime and SynthesisCore payload"
+flux_install_module_files
+flux_install_runtime
+flux_stage_config
 
-# Easter Egg
-case "$((RANDOM % 10 + 1))" in
-1) ui_print "- Adaptive Performance Enabled." ;;
-2) ui_print "- Dynamic Optimization Loaded." ;;
-3) ui_print "- Performance in Motion." ;;
-4) ui_print "- Smart Efficiency Activated." ;;
-5) ui_print "- Tuning Resources..." ;;
-6) ui_print "- Balancing Power and Speed." ;;
-7) ui_print "- Flux Engine Ready." ;;
-8) ui_print "- Optimized for Gaming." ;;
-9) ui_print "- Powered by SynthesisCore." ;;
-10) ui_print "- Welcome to Flux Tweaks!" ;;
-esac
+# ── [6/8] WebUI and module metadata ──────────────────────────────────────────
+flux_step_begin "WebUI and module metadata"
+flux_install_webui
+flux_configure_manager_integration
+
+# ── [7/8] Permissions and configuration ──────────────────────────────────────
+# Permissions are applied before the configuration settles because flux_settle_config runs the
+# daemon to adjudicate the existing gamelist, and the daemon needs its execute bit first.
+flux_step_begin "Permissions and configuration"
+flux_apply_permissions
+flux_verify_permissions
+flux_settle_config
+
+# ── [8/8] Final verification ─────────────────────────────────────────────────
+flux_step_begin "Final verification"
+flux_finalize
+
+# ── Result ───────────────────────────────────────────────────────────────────
+# Reachable only because no stage aborted.
+if [ "${FLUX_WARN_COUNT}" -gt 0 ]; then
+	flux_summary LIMITED
+else
+	flux_summary SUCCESS
+fi
