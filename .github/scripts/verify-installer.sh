@@ -589,16 +589,49 @@ else
 	green "  no eval, and every destination is a project-controlled constant"
 fi
 
-# G. The committed default must stay unconfigured until a real URL is verified.
+# G. The committed configuration is coherent, in whichever state it is left.
 COMMITTED_DONATE="$(sed -n 's/^OFFICIAL_DONATION_URL=//p' module/installer/config.sh | tr -d '"'"'"'"')"
+WEBUI_DONATE="$(sed -n "s/^const OFFICIAL_DONATION_URL = '\(.*\)'$/\1/p" \
+	webui/src/views/Home.vue | head -1)"
+
 if [ -n "${COMMITTED_DONATE}" ]; then
 	case "${COMMITTED_DONATE}" in
-	https://*) info "a donation URL is configured: ${COMMITTED_DONATE}" ;;
+	https://*) green "  donation URL configured: ${COMMITTED_DONATE}" ;;
 	*) fail "OFFICIAL_DONATION_URL is set to a non-https value: ${COMMITTED_DONATE}" ;;
 	esac
+
+	# The shell constant and the WebUI constant are two restatements of ONE destination — a Vue
+	# page cannot source a shell file. If they disagree, the module card and the WebUI send users
+	# to different addresses, and nothing else in the build would notice.
+	if [ "${WEBUI_DONATE}" = "${COMMITTED_DONATE}" ]; then
+		green "  the WebUI support button points at the same destination"
+	else
+		fail "the WebUI and the installer disagree about the donation destination:"
+		fail "  module/installer/config.sh: ${COMMITTED_DONATE}"
+		fail "  webui/src/views/Home.vue:   ${WEBUI_DONATE:-<not found>}"
+	fi
 else
 	green "  OFFICIAL_DONATION_URL is unset, so no donate metadata or button is claimed"
 fi
+
+# A private-channel Telegram link can never be a public donation destination: t.me/c/<id>/
+# addresses a channel by its internal id and resolves only for accounts already in it. Exactly
+# such a link was the donation destination here for a long time, so this pins the specific
+# mistake rather than trusting it to stay fixed.
+#
+# Scoped to the two donation constants on purpose. A repo-wide grep also catches
+# webui/src/views/Settings.vue's `openTelegram`, which is a community link rather than a donation
+# one and is equally broken for non-members — but the correct public handle is not known here,
+# and a check nobody can make pass is a check that gets disabled. That one is reported to the
+# maintainer instead of failing the build.
+DONATE_DESTINATIONS="${COMMITTED_DONATE} ${WEBUI_DONATE}"
+case "${DONATE_DESTINATIONS}" in
+*t.me/c/*)
+	fail "a donation destination is a private-channel t.me/c/ link, which fails for every"
+	fail "  account that is not already a member of that channel"
+	;;
+*) green "  no donation destination is a private-channel Telegram link" ;;
+esac
 
 # ═══ 7. Blast radius ═════════════════════════════════════════════════════════
 head2 "7. Blast radius"

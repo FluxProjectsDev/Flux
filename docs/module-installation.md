@@ -136,24 +136,30 @@ installation is tolerated.
 
 ## Support and donations
 
-| Manager | WebUI | Action button | `donate` metadata |
-|---|---|---|---|
-| Magisk | via Action | opens the WebUI | not read |
-| KernelSU | native | opens Support | read by MMRL-family UIs |
-| APatch | native | opens Support | read by MMRL-family UIs |
-| MMRL | native card | defers to the card | read |
+The official destination is <https://sociabuzz.com/fbrichy>.
+
+| Manager | WebUI | Action button | `donate` metadata | Reaches Support via |
+|---|---|---|---|---|
+| Magisk | via Action | opens the WebUI | not read | the WebUI's Support entry |
+| KernelSU | native | opens Support | read by MMRL-family UIs | Action, or the WebUI |
+| APatch | native | opens Support | read by MMRL-family UIs | Action, or the WebUI |
+| MMRL | native card | defers to the card | read | the card, or the WebUI |
 
 The Action button is spent on whatever the manager cannot already do. KernelSU and
-APatch already have a WebUI button, so Action goes to Support. Magisk has no WebUI
-button, so Action opens the WebUI — which means **Magisk users have no Support
-entry point**, and Flux does not pretend otherwise.
+APatch already have a WebUI button, so their Action goes to Support. Magisk has no
+WebUI button, so its Action opens the WebUI — which means Magisk has no *dedicated*
+Support button, but Magisk users still reach Support through the WebUI's own entry.
 
-**Flux currently has no official donation destination.** `OFFICIAL_DONATION_URL`
-in `module/installer/config.sh` is empty, and while it is empty every donate path
-is inert: no `donate` key is written into `module.prop`, no donation button is
-claimed, and the Action button says plainly that there is nothing to open. To
-enable it, set that one constant to an `https://` URL and rebuild.
+`OFFICIAL_DONATION_URL` in `module/installer/config.sh` is the single definition.
+Setting it enables all three paths at once — the `donate`/`donateIcon` keys in
+`module.prop`, the Action button on KernelSU and APatch, and the WebUI entry.
+Clearing it back to `""` disables all three, and no donation button is claimed
+anywhere.
 
-Every URL Flux can open is a compile-time constant in that file. Nothing is read
-from input, from a file on the device, from a property, or from the network, and
-no donation page is ever opened during installation or boot.
+Because a WebUI page cannot source a shell file, `webui/src/views/Home.vue`
+restates the same URL, and CI asserts the two agree so they cannot drift into
+sending users to different addresses.
+
+Every URL Flux can open is a compile-time constant. Nothing is read from input,
+from a file on the device, from a property, or from the network, and no donation
+page is ever opened during installation or boot — only a deliberate tap.

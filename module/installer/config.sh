@@ -32,20 +32,25 @@ FLUX_ISSUES_URL="https://github.com/FluxProjectsDev/Flux/issues"
 
 # Official donation destination.
 #
-# INTENTIONALLY EMPTY. Flux has no verified donation URL, and this must not be filled in with a
-# guess. The consequences of getting it wrong are asymmetric: a wrong URL on a donation button
-# sends a user's money, or their trust, somewhere the project does not control, and the user has
-# no way to tell a mistake from an endorsement.
+# Supplied by the project maintainer (FebriCahyaa). SociaBuzz is a creator-support platform; the
+# page is the maintainer's own. That provenance is the whole test applied here — a donation URL
+# is not something to infer, because the consequences of getting it wrong are asymmetric: a wrong
+# address sends a user's money, or their trust, somewhere the project does not control, and the
+# user has no way to tell a mistake from an endorsement.
 #
-# Specifically rejected as a source: the `https://t.me/c/3901105851/3` link in
-# webui/src/views/Home.vue. A t.me/c/<internal-id>/ link addresses a *private* channel by its
-# internal id — it resolves only for accounts that are already members of that channel and fails
-# for every other user, so it cannot serve as a public donation destination.
+# Rejected as a source, and worth recording so nobody reaches for it again: the
+# `https://t.me/c/3901105851/3` link that webui/src/views/Home.vue used to carry. A
+# t.me/c/<internal-id>/ link addresses a *private* channel by its internal id — it resolves only
+# for accounts already in that channel and fails for everyone else, so it could never have served
+# as a public donation destination.
 #
-# While this is empty, every donate path stays inert and no donate button is shown or claimed:
-#   - compile_zip.sh writes no `donate=` / `donateIcon=` key into module.prop
-#   - action.sh reports that no donation destination is configured, and exits successfully
-#   - the WebUI hides its support entry
+# Setting this enables every donate path at once, and nothing else needs to change:
+#   - compile_zip.sh appends `donate=` and `donateIcon=` to module.prop
+#   - action.sh opens it from the Action button on KernelSU and APatch
+#   - the WebUI's support entry points here
 #
-# To enable, set this to the official https:// URL and rebuild. Nothing else needs to change.
-OFFICIAL_DONATION_URL=""
+# Clearing it back to "" disables all three again, and the fixtures cover both states.
+#
+# webui/src/views/Home.vue must carry the same URL — a WebUI page cannot source a shell file.
+# verify-installer.sh asserts the two agree, so they cannot drift apart silently.
+OFFICIAL_DONATION_URL="https://sociabuzz.com/fbrichy"

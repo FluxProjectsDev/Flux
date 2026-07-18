@@ -189,7 +189,17 @@ function handleGuideClick() {
   KernelSU.openWebsite('')
 }
 
+// Must stay identical to OFFICIAL_DONATION_URL in module/installer/config.sh, which is the
+// project's single definition of this destination. A Vue page cannot source a shell file, so the
+// value is restated here and .github/scripts/verify-installer.sh asserts the two agree — the
+// alternative is two donation addresses that drift apart without anyone noticing.
+//
+// This previously pointed at https://t.me/c/3901105851/3, which addresses a private Telegram
+// channel by internal id: it resolved only for accounts already in that channel and failed for
+// every other user, so the Support button was broken for essentially everyone who tapped it.
+const OFFICIAL_DONATION_URL = 'https://sociabuzz.com/fbrichy'
+
 function handleDonateClick() {
-  KernelSU.openWebsite('https://t.me/c/3901105851/3')
+  KernelSU.openWebsite(OFFICIAL_DONATION_URL)
 }
 </script>
