@@ -106,7 +106,12 @@ done < <(find "${WORK}/pkg" -type f | sort)
 
 ENTRY_COUNT="$(($(wc -l <"${INVENTORY}") - 1))"
 info "entries: ${ENTRY_COUNT} (unclassified: ${UNCLASSIFIED})"
-column -t -s'	' "${INVENTORY}" | head -40
+# Truncate the *input* to column, never column's output to head. Piping column into `head -40`
+# means head closes the pipe after 40 lines, column dies of SIGPIPE mid-write, and under
+# `set -o pipefail` the "column: write error" fails the whole proof — intermittently, depending
+# on whether column had flushed before head closed. Heading the file first (a real file, so head
+# exits cleanly) hands column a bounded input and no pipe to be killed on.
+head -n 41 "${INVENTORY}" | column -t -s'	'
 [ "${ENTRY_COUNT}" -gt 40 ] && info "... $((ENTRY_COUNT - 40)) more (full inventory in the artifact)"
 if [ -n "${INVENTORY_OUT:-}" ]; then
 	cp "${INVENTORY}" "${INVENTORY_OUT}"
