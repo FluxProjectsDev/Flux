@@ -69,45 +69,128 @@ flux_ui_init() {
 	esac
 }
 
-# ── Identity ─────────────────────────────────────────────────────────────────
-# Three tiers, narrowest guaranteed to render:
+# ── Identity ────────────────────────────────────────────────────────────────
+# The Flux emblem, matching the approved reference (the swept "F": long upper ribbon, vertical
+# left spine, diagonal inner cut, smaller lower ribbon, dashed outline, horizontal dotted texture
+# in both ribbons) with the outline mixed-case "Flux" wordmark beneath it.
 #
-#   full     25 columns of ASCII block art, plus a 24-column subtitle.
-#   compact  16 columns: the product name and a shortened subtitle.
-#   plain    4 columns: the product name alone.
+# FIXED CONSTANTS, not generated. The art below is authored with scripts/compose-ascii-logo.py
+# (a development tool, never packaged and never run on a device) and pasted here once, reviewed.
+# .github/scripts/verify-installer.sh holds the emitted output to a byte-for-byte golden file, so
+# a stray edit to a single space fails CI rather than shipping a broken logo.
 #
-# Each tier is narrower than the threshold that selects it. That is the whole contract — a
-# fallback that overflows the width it was chosen for is not a fallback, it is a second bug.
+# The heredoc delimiter is QUOTED ('FLUX_ASCII_LOGO'). That is load-bearing: it disables
+# parameter expansion, command substitution and backslash processing, so the many `\` and `/`
+# glyphs in the diagonals survive verbatim. An unquoted delimiter would eat every backslash and
+# silently shred the art.
 #
-# An unset or zero COLUMNS means "not reported", which is the normal case in recovery, and takes
-# the full banner: every console this realistically runs in is at least 25 wide.
+# `IFS= read -r` matters for the same reason: IFS= keeps the leading spaces that position every
+# line, and -r stops read from consuming backslashes.
 #
-# All three tiers are plain ASCII. The art is not "Unicode art with an ASCII fallback" —
-# box-drawing characters are precisely what turns into garbage when the locale is unset, and the
-# banner is the first thing the user sees.
-flux_print_banner() {
-	_cols="${COLUMNS:-0}"
-	if [ "${_cols}" -gt 0 ] && [ "${_cols}" -lt 26 ]; then
-		ui_print ''
-		ui_print 'FLUX'
-		if [ "${_cols}" -ge 17 ]; then
-			ui_print 'Adaptive Runtime'
-		fi
-		ui_print ''
-		return 0
-	fi
+# One further hazard, checked rather than assumed: Magisk's ui_print writes with `echo -e`, which
+# interprets \a \b \c \e \f \n \r \t \v \\ and \0. The art deliberately contains no such
+# sequence — every backslash in it is followed by a space, a slash, an underscore or a line end —
+# and verify-installer.sh asserts that, because one `\b` added later would eat a character on
+# every real device while looking perfect in a fixture that echoes plainly.
 
-	# Single-quoted so the backslashes are literal: this art is full of them, and escaping each
-	# one inside double quotes is how a banner silently loses a stroke.
-	ui_print ''
-	ui_print ' ___  _     _   _ __   __'
-	ui_print '| __|| |   | | | |\ \ / /'
-	ui_print '| _| | |   | | | | \ V / '
-	ui_print '| |  | |__ | |_| | / . \ '
-	ui_print '|_|  |____| \___/ /_/ \_\'
-	ui_print ''
-	ui_print ' ADAPTIVE RUNTIME ENGINE'
-	ui_print ''
+FLUX_BANNER_WIDTH=40
+FLUX_BANNER_COMPACT_WIDTH=25
+
+flux_banner_detailed() {
+	while IFS= read -r _flux_line; do
+		ui_print "${_flux_line}"
+	done <<'FLUX_ASCII_LOGO'
+        ________________________________
+      -'  . . . . . . . . . . . . . . \
+     /  . . . . . . . . . . . . . . .\
+    /  . . . . . . . . . . . . . . .\
+   /  . . . . . . . . . . . . . . \
+  /  . . . . . . . . . . . . . . \
+ |  . . . . . . . . . . . .  ---\
+ |        -------------------'
+ |       /
+ |      /
+ |     /     _____________________
+ |   /     /  . . . . . . . . . \
+ |  /     / . . . . . . . . . \
+ | /     / . . . . . . . . . \
+ |     / . . . . . . . . .  \
+ |    /          ---------'
+ |   /       ----
+ | . . . . /
+ | . . .  /
+ | . . ./
+ |. . /
+| . ./
+|. ./
+| /
+
+  _____  _
+ |  ___|| |  _   _  __  __
+ | |__  | | | | | | \ \/ /
+ |  __| | | | | | |  \  /
+ | |    | | | |_| |  /  \
+ |_|    |_|  \__,_| /_/\_\
+FLUX_ASCII_LOGO
+}
+
+flux_banner_compact() {
+	while IFS= read -r _flux_line; do
+		ui_print "${_flux_line}"
+	done <<'FLUX_ASCII_LOGO_COMPACT'
+     _________________
+   -' . . . . . . . \
+  /  . . . . . . . \
+ /  . . . . . . . \
+ | . . . . . . --\
+ |    ---------'
+ |   /
+ |  /   ___________
+ |/   /  . . .   \
+ |   /  . . .   \
+ |   /    -----'
+ |  /  ---
+| .  /
+| /
+
+Flux
+FLUX_ASCII_LOGO_COMPACT
+}
+
+# The detailed emblem is the default. The narrow variants are selected only when the console
+# ACTUALLY reports a width too small for it — an unset or zero COLUMNS means "not reported",
+# which is the norm in recovery and in module managers, and takes the detailed art.
+#
+# Each tier's WIDEST line, art and strapline together, is no wider than the threshold that
+# selects it. That is the whole contract of a fallback, and it is easy to get wrong here: the
+# one-line strapline is 38 columns, so a narrow tier that used the 22-column emblem and then
+# printed the full strapline underneath would wrap anyway and have accomplished nothing. The
+# narrow tiers therefore break the strapline up as well.
+#
+#   tier      art  widest line  selected when
+#   detailed   40      40       COLUMNS unset, or >= 40
+#   compact    22      25       25 <= COLUMNS < 40
+#   plain       4      16       COLUMNS < 25
+flux_print_banner() {
+	ui_print ""
+	_cols="${COLUMNS:-0}"
+	if [ "${_cols}" -le 0 ] || [ "${_cols}" -ge "${FLUX_BANNER_WIDTH}" ]; then
+		flux_banner_detailed
+		ui_print ""
+		ui_print "Adaptive Runtime Engine"
+		ui_print "Hardware-aware | Verified | Reversible"
+	elif [ "${_cols}" -ge "${FLUX_BANNER_COMPACT_WIDTH}" ]; then
+		flux_banner_compact
+		ui_print ""
+		ui_print "Adaptive Runtime Engine"
+		ui_print "Hardware-aware | Verified"
+		ui_print "Reversible"
+	else
+		ui_print "Flux"
+		ui_print ""
+		ui_print "Adaptive Runtime"
+	fi
+	ui_print ""
 }
 
 # ── Structure ────────────────────────────────────────────────────────────────

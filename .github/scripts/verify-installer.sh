@@ -633,8 +633,129 @@ case "${DONATE_DESTINATIONS}" in
 *) green "  no donation destination is a private-channel Telegram link" ;;
 esac
 
-# ═══ 7. Blast radius ═════════════════════════════════════════════════════════
-head2 "7. Blast radius"
+# ═══ 7. Installer banner (golden output) ═════════════════════════════════════
+head2 "7. Installer banner"
+
+# Byte-for-byte against a committed golden file, per tier. The banner is a fixed reviewed
+# constant: a single space edited in the heredoc changes the logo, and nothing else in the build
+# would notice. Emitted through the real ui.sh so this tests what actually reaches the console,
+# not the heredoc's source text.
+banner_at() {
+	local cols="$1"
+	if [ "${cols}" -eq 0 ]; then
+		sh -c '. module/installer/ui.sh; flux_print_banner'
+	else
+		COLUMNS="${cols}" sh -c '. module/installer/ui.sh; flux_print_banner'
+	fi
+}
+
+for spec in "0:banner-detailed" "30:banner-compact" "20:banner-plain"; do
+	cols="${spec%%:*}"
+	name="${spec##*:}"
+	golden=".github/fixtures/${name}.golden"
+	actual="${ROOT}/${name}.actual"
+	banner_at "${cols}" >"${actual}"
+	if [ ! -f "${golden}" ]; then
+		fail "missing golden fixture: ${golden}"
+	elif diff -u "${golden}" "${actual}" >"${ROOT}/${name}.diff" 2>&1; then
+		green "  ${name}: byte-identical to its golden fixture"
+	else
+		fail "${name} differs from ${golden}:"
+		sed 's/^/    /' "${ROOT}/${name}.diff" | head -30 >&2
+	fi
+done
+
+# Each tier's widest line must fit the width that selects it. A "fallback" that overflows the
+# console it was chosen for has accomplished nothing — and this is easy to break, because the
+# strapline is wider than the compact emblem.
+for spec in "30:25" "20:16"; do
+	cols="${spec%%:*}"
+	maxw="${spec##*:}"
+	got="$(banner_at "${cols}" | awk '{ if (length > m) m = length } END { print m+0 }')"
+	if [ "${got}" -gt "${cols}" ]; then
+		fail "at COLUMNS=${cols} the banner is ${got} columns wide and would wrap"
+	elif [ "${got}" -ne "${maxw}" ]; then
+		fail "at COLUMNS=${cols} expected widest ${maxw}, got ${got}"
+	fi
+done
+green "  every tier fits the width that selects it (40 / 25 / 16)"
+
+# Tabs would be re-expanded to a different width by every console and destroy the alignment.
+if grep -qP '\t' .github/fixtures/*.golden; then
+	fail "the banner contains a tab; ASCII art must be spaces only"
+else
+	green "  no tabs in any banner tier"
+fi
+if grep -q $'\r' .github/fixtures/*.golden; then
+	fail "the banner has CRLF line endings"
+else
+	green "  LF line endings"
+fi
+
+# Magisk's ui_print writes with `echo -e`, which interprets \a \b \c \e \f \n \r \t \v \\ and
+# \0nnn. The art is full of backslashes; every one of them must be followed by something that is
+# NOT an escape letter, or the logo silently loses characters on real devices while looking
+# perfect in any fixture that echoes plainly.
+if grep -qP '\\\\[abcefnrtv0\\\\]' .github/fixtures/banner-detailed.golden; then
+	fail "the banner contains a backslash escape that 'echo -e' would consume"
+	grep -nP '\\\\[abcefnrtv0\\\\]' .github/fixtures/banner-detailed.golden >&2
+else
+	green "  no backslash sequence that echo -e would interpret"
+fi
+
+# Prove it rather than trust the pattern: re-emit through an echo -e based ui_print, the way
+# Magisk actually does, and require the content to be unchanged.
+cat >"${ROOT}/magisk-uiprint.sh" <<'MAGISKEOF'
+ui_print() { echo -e "$1"; }
+. module/installer/ui.sh
+flux_print_banner
+MAGISKEOF
+if command -v dash >/dev/null 2>&1; then
+	dash "${ROOT}/magisk-uiprint.sh" 2>&1 | sed 's/^-e //' >"${ROOT}/echoe.actual"
+	if diff -q .github/fixtures/banner-detailed.golden "${ROOT}/echoe.actual" >/dev/null 2>&1; then
+		green "  survives an 'echo -e' ui_print unchanged (the Magisk path)"
+	else
+		fail "the banner is altered when ui_print uses 'echo -e', as Magisk's does"
+		diff .github/fixtures/banner-detailed.golden "${ROOT}/echoe.actual" | head -20 >&2
+	fi
+fi
+
+# Portability across the shells a manager might use. bash and dash are the two available here;
+# dash is the closest stand-in for Android's ash/toybox sh.
+for shell in dash bash; do
+	command -v "${shell}" >/dev/null 2>&1 || continue
+	"${shell}" -c '. module/installer/ui.sh; flux_print_banner' >"${ROOT}/${shell}.actual" 2>&1
+	if diff -q .github/fixtures/banner-detailed.golden "${ROOT}/${shell}.actual" >/dev/null 2>&1; then
+		green "  identical under ${shell}"
+	else
+		fail "the banner differs under ${shell}"
+	fi
+done
+
+# The approved reference image is a design input, not module content.
+if [ -n "$(find . -name 'logo_ascii*' -not -path './.git/*' -path './module/*' 2>/dev/null)" ]; then
+	fail "the reference logo image is inside module/ and would be packaged"
+else
+	green "  the reference image is not inside module/"
+fi
+
+# The retired generic FIGlet wordmark must not come back.
+if grep -qF '|____| \___/' module/installer/ui.sh 2>/dev/null; then
+	fail "the retired generic FIGlet FLUX banner is still present in ui.sh"
+else
+	green "  the previous generic ASCII banner is gone"
+fi
+
+# The strapline the approved design calls for.
+if grep -q "Adaptive Runtime Engine" .github/fixtures/banner-detailed.golden &&
+	grep -q "Hardware-aware | Verified | Reversible" .github/fixtures/banner-detailed.golden; then
+	green "  strapline present: 'Adaptive Runtime Engine' / 'Hardware-aware | Verified | Reversible'"
+else
+	fail "the banner strapline is missing or altered"
+fi
+
+# ═══ 8. Blast radius ═════════════════════════════════════════════════════════
+head2 "8. Blast radius"
 if [ -e /data/adb/modules/flux ]; then
 	fail "a real module directory exists on this host — the fixtures must never touch it"
 else

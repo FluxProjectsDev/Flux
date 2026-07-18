@@ -56,9 +56,11 @@ flux_print_banner
 
 # ── [1/8] Package integrity ──────────────────────────────────────────────────
 flux_step_begin "Package integrity"
+flux_info "Verifying package..."
 flux_integrity_init || flux_abort "Cannot create the verification work directory" \
 	"TMPDIR is not writable."
-flux_step_ok "Installer components verified against their published checksums"
+flux_step_ok "Package integrity verified"
+flux_info "Installer components matched their published checksums"
 _ub_state="$(flux_check_update_binary)"
 case "${_ub_state}" in
 verified) flux_step_ok "Installer stub checksum verified" ;;

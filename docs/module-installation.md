@@ -65,6 +65,28 @@ accept `set_perm_recursive` and ignore it); the WebUI entry point is asserted to
 exist; the generated `module.prop` is re-read from the installed tree and its
 `id`, `name`, `version` and `versionCode` validated.
 
+The installer opens with the Flux emblem — the swept "F" with its upper and lower
+ribbons, dotted texture and outline `Flux` wordmark — followed by:
+
+```
+Adaptive Runtime Engine
+Hardware-aware | Verified | Reversible
+```
+
+and then goes straight to real work. The art is a fixed, reviewed constant in
+`module/installer/ui.sh` (a quoted heredoc, so nothing in it is expanded), held to
+a byte-for-byte golden fixture in CI. Three width tiers exist, each no wider than
+the width that selects it:
+
+| Tier | Art | Widest line | Selected when |
+|---|---|---|---|
+| detailed | 40 x 31 | 40 | `COLUMNS` unset, or >= 40 |
+| compact | 22 x 16 | 25 | 25 <= `COLUMNS` < 40 |
+| plain | 4 x 1 | 16 | `COLUMNS` < 25 |
+
+The detailed emblem is the default: recovery and module managers essentially never
+set `COLUMNS`, and an unset width means "not reported", so it takes the full art.
+
 There are no sleeps, no spinners and no progress animation. Output is plain ASCII
 with `[*]`/`[OK]`/`[WARN]`/`[FAIL]` markers, switching to Unicode only when a
 UTF-8 locale is declared — an unset locale, which is normal in recovery, means
