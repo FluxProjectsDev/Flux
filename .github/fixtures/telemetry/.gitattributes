@@ -1,0 +1,4 @@
+# These are wire-format fixtures: their bytes ARE the test. Git must not normalise line endings
+# here, or crlf.snapshot silently becomes an LF file and the CRLF-tolerance case stops testing
+# anything while still reporting green.
+*.snapshot -text

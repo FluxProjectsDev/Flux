@@ -74,6 +74,7 @@ SOURCES=(
     "${SCRIPT_DIR}/DecisionEngineTest.cpp"
     "${SCRIPT_DIR}/DecisionVectorsTest.cpp"
     "${SCRIPT_DIR}/TelemetryPipelineTest.cpp"
+    "${SCRIPT_DIR}/TelemetryContractTest.cpp"
     "${SCRIPT_DIR}/ExecutionEngineTest.cpp"
     "${SCRIPT_DIR}/ExecutionRuntimeTest.cpp"
     "${SCRIPT_DIR}/RuntimeTuningTest.cpp"
@@ -116,4 +117,8 @@ echo "Compiling with ${CXX} (sanitizers: ${SANITIZE})"
 "${CXX}" "${CXXFLAGS[@]}" "${SOURCES[@]}" "${LDFLAGS[@]}" -o "${BUILD_DIR}/flux_tests"
 
 echo "Running"
+# The telemetry contract fixtures are the SAME corpus the shell self-test reads, so both parsers
+# are held to one source of truth. Passed explicitly because the test binary inherits the caller's
+# working directory, which is not fixed.
+export FLUX_TELEMETRY_CORPUS="${SCRIPT_DIR}/../../.github/fixtures/telemetry/"
 "${BUILD_DIR}/flux_tests"

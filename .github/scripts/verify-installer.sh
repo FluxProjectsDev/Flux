@@ -506,7 +506,10 @@ PROPEOF
 		printf 'stub' >"${r}/mod/${f}"
 	done
 
-	printf 'schema_version=2\ncpu_temp=42.0\nbattery_temp=31.5\n' >"${r}/cfg/synthesis_core.json"
+	# The shared corpus, in the real wire format (key<SPACE>value). NOT hand-written here: the
+	# previous fixture was key=value, which agreed with the parser bug instead of catching it,
+	# and jni/tests/TelemetryContractTest.cpp holds this same file to the production decoder.
+	cp .github/fixtures/telemetry/valid-v2.snapshot "${r}/cfg/synthesis_core.json"
 	printf '3\n' >"${r}/cfg/current_profile"
 	printf 'snapdragon\n' >"${r}/cfg/soc_recognition"
 
@@ -642,22 +645,94 @@ grep -q "^\[WARN\] Telemetry stale" "${T}/out.log" ||
 [ "${RC}" = "2" ] || fail "stale telemetry exited ${RC}, expected 2"
 green "  stale telemetry: WARN, exit 2"
 
-# ── E. Malformed telemetry — reported safely, never parsed as data ───────────
-for spec in "noschema:cpu_temp=42.0" "textschema:schema_version=abc" "injectschema:schema_version=2; rm -rf /"; do
-	name="${spec%%:*}"
-	body="${spec#*:}"
-	T="$(st_tree "malformed-${name}")"
+# ── E. The telemetry contract, over the shared corpus ────────────────────────
+# Every fixture here is also decoded by the production TelemetryDecoder in
+# jni/tests/TelemetryContractTest.cpp. Two parsers, one corpus: if the wire format, the tokenizer
+# or the schema bounds move, one of the two goes red. This is the check that would have caught
+# the field failure, where the shell read key=value and every production consumer read
+# key<SPACE>value.
+#
+# "<fixture>:<expected exit>:<expected parser state>"
+for spec in \
+	"valid-v2:2:ok" \
+	"valid-v2-schema-last:2:ok" \
+	"crlf:2:ok" \
+	"missing-schema:1:noschema" \
+	"keyvalue-not-contract:1:noschema" \
+	"malformed-schema:1:malformed" \
+	"unsupported-schema:1:unsupported" \
+	"legacy-schema:1:legacy" \
+	"duplicate-schema:1:duplicate" \
+	"empty:1:empty"; do
+	fixture="${spec%%:*}"
+	rest="${spec#*:}"
+	want_rc="${rest%%:*}"
+	want_state="${rest##*:}"
+
+	T="$(st_tree "corpus-${fixture}")"
 	st_stub "${T}" arm64-v8a 0
-	printf '%s\n' "${body}" >"${T}/cfg/synthesis_core.json"
+	cp ".github/fixtures/telemetry/${fixture}.snapshot" "${T}/cfg/synthesis_core.json"
 	RC="$(st_run "${T}")"
-	grep -qE "^\[FAIL\] Telemetry (snapshot|schema) malformed" "${T}/out.log" ||
-		fail "malformed telemetry (${name}) was not reported as malformed"
-	[ "${RC}" = "1" ] || fail "malformed telemetry (${name}) exited ${RC}, expected 1"
+	got_state="$(sed -n 's/^  parser: //p' "${T}/out.log" | head -1)"
+
+	[ "${got_state}" = "${want_state}" ] ||
+		fail "corpus ${fixture}: parser state '${got_state}', expected '${want_state}'"
+	[ "${RC}" = "${want_rc}" ] ||
+		fail "corpus ${fixture}: exit ${RC}, expected ${want_rc}"
 done
-# The injected case must not have executed anything: the tree is still intact.
-[ -f "${ROOT}/selftest-malformed-injectschema/mod/module.prop" ] ||
-	fail "a shell metacharacter in the telemetry file caused execution"
-green "  malformed telemetry: FAIL, exit 1, and no injected command ran"
+green "  telemetry corpus: all 10 fixtures classified as the production decoder does"
+
+# The regression, named explicitly so it cannot be quietly re-broken: a healthy schema-v2 snapshot
+# must PASS, and a key=value file must NOT be mistaken for one.
+T="${ROOT}/selftest-corpus-valid-v2"
+grep -q "^\[PASS\] Telemetry schema v2" "${T}/out.log" ||
+	fail "a healthy schema-v2 snapshot did not PASS (this was the physical-device failure)"
+T="$(st_tree corpus-keyvalue-not-contract)"
+st_stub "${T}" arm64-v8a 0
+cp .github/fixtures/telemetry/keyvalue-not-contract.snapshot "${T}/cfg/synthesis_core.json"
+st_run "${T}" >/dev/null
+grep -q "not the v2 format" "${T}/out.log" ||
+	fail "a key=value snapshot was not identified as the wrong dialect"
+
+# Permission denied is its own state, distinct from absent and from malformed.
+T="$(st_tree denied)"
+st_stub "${T}" arm64-v8a 0
+chmod 000 "${T}/cfg/synthesis_core.json"
+RC="$(st_run "${T}")"
+if [ "$(id -u)" = "0" ]; then
+	info "  skipped: running as root, an unreadable file is still readable"
+else
+	grep -q "^\[FAIL\] Telemetry snapshot unreadable (permission denied)" "${T}/out.log" ||
+		fail "an unreadable snapshot was not reported as permission denied"
+	[ "${RC}" = "1" ] || fail "permission denied exited ${RC}, expected 1"
+fi
+chmod 644 "${T}/cfg/synthesis_core.json"
+
+# A leftover atomic temp file is not the snapshot and must not be read as one. SynthesisCore
+# writes temp -> fsync -> rename, so the target is never partial; a stray temp is debris.
+T="$(st_tree atomictmp)"
+st_stub "${T}" arm64-v8a 0
+printf 'schema_version 9\n' >"${T}/cfg/synthesis_core.json.tmp"
+RC="$(st_run "${T}")"
+grep -q "^\[PASS\] Telemetry schema v2" "${T}/out.log" ||
+	fail "a stray .tmp file changed the verdict for a healthy snapshot"
+[ "${RC}" = "2" ] || fail "stray temp file exited ${RC}, expected 2"
+green "  permission denied, and a stray atomic temp file, are handled as their own states"
+
+# The diagnostic block reports safe metadata only — never the payload, which carries the focused
+# package, pids and uids.
+T="$(st_tree diag)"
+st_stub "${T}" arm64-v8a 0
+st_run "${T}" >/dev/null
+for field in "path:" "parser:" "schema:" "age:" "boot:"; do
+	grep -q "  ${field}" "${T}/out.log" ||
+		fail "the telemetry diagnostic omits '${field}'"
+done
+grep -q "com.example.game" "${T}/out.log" &&
+	fail "the diagnostic printed the focused package from the telemetry payload"
+grep -qE "focused_uid|focused_pid|thermal_headroom" "${T}/out.log" &&
+	fail "the diagnostic printed raw telemetry payload fields"
+green "  diagnostic reports path/parser/schema/age/boot, and no payload"
 
 # ── F. Missing SynthesisCore — critical ──────────────────────────────────────
 T="$(st_tree noapk)"
@@ -806,7 +881,7 @@ for payload in '$(touch CANARY)' '`touch CANARY`' '; touch CANARY' '&& touch CAN
 	st_stub "${T}" arm64-v8a 0
 	printf '%s\n' "$(printf '%s' "${payload}" | sed "s|CANARY|${CANARY}|")" \
 		>"${T}/cfg/soc_recognition"
-	printf 'schema_version=%s\n' "$(printf '%s' "${payload}" | sed "s|CANARY|${CANARY}|")" \
+	printf "schema_version %s\n" "$(printf '%s' "${payload}" | sed "s|CANARY|${CANARY}|")" \
 		>"${T}/cfg/synthesis_core.json"
 	printf '%s\n' "$(printf '%s' "${payload}" | sed "s|CANARY|${CANARY}|")" \
 		>"${T}/cfg/current_profile"
@@ -844,8 +919,9 @@ if command -v dash >/dev/null 2>&1; then
 	st_run "${T}" >/dev/null
 	# The telemetry age advances between the two runs, so it is normalised out. Everything else
 	# must match byte for byte — a bashism shows up as a diff or a syntax error, not as a clock.
-	sed -E 's/\([0-9]+s old\)/(Ns old)/' "${T}/dash.log" >"${T}/dash.norm"
-	sed -E 's/\([0-9]+s old\)/(Ns old)/' "${T}/out.log" >"${T}/sh.norm"
+	norm_clock() { sed -E -e 's/\([0-9]+s old\)/(Ns old)/' -e 's/^  age:    [0-9]+s/  age:    Ns/'; }
+	norm_clock <"${T}/dash.log" >"${T}/dash.norm"
+	norm_clock <"${T}/out.log" >"${T}/sh.norm"
 	if diff -q "${T}/dash.norm" "${T}/sh.norm" >/dev/null 2>&1; then
 		green "  identical output under dash and sh (no bashisms)"
 	else

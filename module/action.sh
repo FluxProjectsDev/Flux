@@ -75,6 +75,15 @@ _pass_count=0
 _warn_count=0
 _fail_count=0
 
+# Telemetry diagnostic state, filled in by check_synthesiscore and printed by the diagnostic
+# block at the end. Defaults describe "never got that far", so a run that aborts early reports
+# unknown rather than inheriting a stale value.
+_tel_raw=""
+_tel_state="unknown"
+_tel_boot="unknown"
+_tel_age=""
+_schema=""
+
 # ── Reporting ────────────────────────────────────────────────────────────────
 # Labels are kept under ~44 columns for the same reason the installer's are: this output is read
 # on a phone, inside a module manager's log window, and a wrapped status line is hard to scan.
@@ -110,10 +119,45 @@ probe() {
 }
 
 # prop_value <key> <file>
-# Reads one `key=value` line. Pure shell, no eval: the value is never interpreted, only printed.
+# Reads one `key=value` line. This is module.prop's format, and ONLY module.prop's format.
+# Pure shell, no eval: the value is never interpreted, only printed.
 prop_value() {
 	[ -f "$2" ] || return 1
 	sed -n "s/^$1=//p" "$2" 2>/dev/null | head -1
+}
+
+# tel_field <key>
+# Reads one field from the telemetry snapshot held in ${_tel_raw}.
+#
+# THE SNAPSHOT IS NOT key=value, AND IT IS NOT JSON. Despite the file being named
+# synthesis_core.json, the schema-v2 wire format is line-oriented `key<SPACE>value`, and the split
+# is on the FIRST space only, so values may themselves contain spaces. Both production consumers
+# do exactly this and are the contract:
+#
+#   jni/engine/telemetry/TelemetryDecoder.cpp   line.find(' '), key = [0,sp), value = (sp,end]
+#   webui/src/stores/Monitor.js                 trimmed.indexOf(' '), same split
+#
+# Using a `key=value` reader here is what made the self-test report a healthy device as
+# "Telemetry snapshot malformed (no schema_version)": the sed found no `schema_version=` because
+# the real line is `schema_version 2`. The fixtures were written in the same wrong format, so
+# they agreed with the bug instead of catching it. .github/fixtures/telemetry/ now holds ONE
+# corpus in the real format, and both this parser and the production C++ decoder are tested
+# against it — see jni/tests/TelemetryContractTest.cpp.
+#
+# Matching "${key} " as a prefix is equivalent to the first-space split, because a key never
+# contains a space: the producer emits fixed identifiers.
+tel_field() {
+	printf '%s\n' "${_tel_raw}" | {
+		while IFS= read -r _tf_line; do
+			case "${_tf_line}" in
+			"$1 "*)
+				printf '%s' "${_tf_line#"$1 "}"
+				return 0
+				;;
+			esac
+		done
+		return 1
+	}
 }
 
 # ── 1. Module installation ───────────────────────────────────────────────────
@@ -254,33 +298,109 @@ check_synthesiscore() {
 		st_fail "SynthesisCore package identity mismatch"
 	fi
 
-	if [ ! -f "${FLUX_TELEMETRY_FILE}" ]; then
-		# Absent telemetry is a degraded state, not a broken install: Flux runs without it, with
-		# fewer inputs. Reporting it FAIL would tell a user to reflash over something a reboot
-		# fixes.
+	# ── The telemetry contract ───────────────────────────────────────────────
+	# Each distinguishable state is reported as itself. Collapsing them loses the one piece of
+	# information that tells a user whether to reboot, reflash, or report a bug.
+	#
+	# SynthesisCore writes temp -> fsync -> rename (see AtomicStatusWatcher.hpp). A rename is
+	# atomic, so the target is NEVER partially visible: a reader sees the whole old file or the
+	# whole new one. That is why there is no retry loop here — a truncated or empty target is a
+	# real fault, not a race that waiting would resolve.
+	if [ ! -e "${FLUX_TELEMETRY_FILE}" ]; then
+		# Not published yet. Degraded, not broken: Flux runs with fewer inputs, and a reboot
+		# fixes it. Reporting FAIL would send a user to reflash over a pending boot.
 		st_warn "Telemetry snapshot not published yet"
+		_tel_state="absent"
+		return
+	fi
+	if [ ! -r "${FLUX_TELEMETRY_FILE}" ]; then
+		st_fail "Telemetry snapshot unreadable (permission denied)"
+		_tel_state="denied"
+		return
+	fi
+	if [ ! -s "${FLUX_TELEMETRY_FILE}" ]; then
+		# Zero bytes behind an atomic writer means the producer wrote nothing, not that a write
+		# is in flight.
+		st_fail "Telemetry snapshot is empty"
+		_tel_state="empty"
 		return
 	fi
 
-	_schema="$(prop_value schema_version "${FLUX_TELEMETRY_FILE}")"
-	if [ -z "${_schema}" ]; then
-		st_fail "Telemetry snapshot malformed (no schema_version)"
+	# Bounded read: the production decoder rejects anything over 64 KiB, so reading more than that
+	# could only produce a verdict the runtime would not agree with. CR is stripped because the
+	# decoder strips a trailing CR per line.
+	_tel_raw="$(head -c 65536 "${FLUX_TELEMETRY_FILE}" 2>/dev/null | tr -d '\r')"
+	if [ -z "${_tel_raw}" ]; then
+		st_fail "Telemetry snapshot unreadable"
+		_tel_state="unreadable"
 		return
 	fi
-	# A non-numeric schema is malformed input, and is reported as such rather than being compared
-	# as a string and silently mismatching.
+
+	# The production decoder rejects a duplicate key outright (DecodeError::DuplicateKey) rather
+	# than taking the first or the last. A shell reader that silently took the first would call a
+	# snapshot healthy that the runtime itself refuses — the self-test would then disagree with
+	# the thing it exists to report on.
+	_tel_dupe="$(printf '%s\n' "${_tel_raw}" | sed -n 's/^\([^ ][^ ]*\) .*/\1/p' |
+		sort | uniq -d | head -1)"
+	if [ -n "${_tel_dupe}" ]; then
+		st_fail "Telemetry has a duplicate key (${_tel_dupe})"
+		_tel_state="duplicate"
+		return
+	fi
+
+	_schema="$(tel_field schema_version)"
+	if [ -z "${_schema}" ]; then
+		# Distinguish "no schema field at all" from "not the contract format". A file written as
+		# key=value parses as zero fields here, and saying "malformed" would send someone hunting
+		# for corruption when the real answer is that a producer is speaking the wrong dialect.
+		if grep -q '^schema_version=' "${FLUX_TELEMETRY_FILE}" 2>/dev/null; then
+			st_fail "Telemetry uses key=value, not the v2 format"
+			st_note "expected: schema_version <value>"
+		else
+			st_fail "Telemetry snapshot has no schema_version"
+		fi
+		_tel_state="noschema"
+		return
+	fi
 	case "${_schema}" in
 	'' | *[!0-9]*)
 		st_fail "Telemetry schema malformed (${_schema})"
+		_tel_state="malformed"
 		return
 		;;
 	esac
-	if [ "${_schema}" != "${FLUX_TELEMETRY_SCHEMA}" ]; then
+	if [ "${_schema}" -lt "${FLUX_TELEMETRY_SCHEMA}" ]; then
+		# A legacy producer, named as such: the fix is to update SynthesisCore, not to reflash.
+		st_fail "Telemetry schema v${_schema} is legacy"
+		st_note "this build speaks v${FLUX_TELEMETRY_SCHEMA}"
+		_tel_state="legacy"
+		return
+	fi
+	if [ "${_schema}" -ne "${FLUX_TELEMETRY_SCHEMA}" ]; then
 		st_fail "Telemetry schema v${_schema} unsupported"
 		st_note "this build speaks v${FLUX_TELEMETRY_SCHEMA}"
+		_tel_state="unsupported"
 		return
 	fi
 	st_pass "Telemetry schema v${FLUX_TELEMETRY_SCHEMA}"
+	_tel_state="ok"
+
+	# Boot identity. The snapshot names the daemon that produced it; if that pid is not the fluxd
+	# running now, the snapshot predates a restart and its contents describe a previous process.
+	# Reported, never acted on.
+	_tel_pid="$(tel_field daemon_pid)"
+	_live_pid=""
+	if command -v pidof >/dev/null 2>&1; then
+		_live_pid="$(probe pidof fluxd | cut -d" " -f1)"
+	fi
+	if [ -z "${_tel_pid}" ] || [ -z "${_live_pid}" ]; then
+		_tel_boot="unknown"
+	elif [ "${_tel_pid}" = "${_live_pid}" ]; then
+		_tel_boot="match"
+	else
+		_tel_boot="stale-producer"
+		st_warn "Telemetry from a previous daemon"
+	fi
 
 	# Freshness. Both timestamps come from the same clock, so a negative age means the file is
 	# stamped in the future — a clock jump, not a fresh snapshot, and it is not treated as one.
@@ -299,13 +419,13 @@ check_synthesiscore() {
 		return
 		;;
 	esac
-	_age=$((_now - _mtime))
-	if [ "${_age}" -lt 0 ]; then
+	_tel_age=$((_now - _mtime))
+	if [ "${_tel_age}" -lt 0 ]; then
 		st_warn "Telemetry timestamp is in the future"
-	elif [ "${_age}" -le "${FLUX_TELEMETRY_MAX_AGE}" ]; then
-		st_pass "SynthesisCore telemetry (${_age}s old)"
+	elif [ "${_tel_age}" -le "${FLUX_TELEMETRY_MAX_AGE}" ]; then
+		st_pass "SynthesisCore telemetry (${_tel_age}s old)"
 	else
-		st_warn "Telemetry stale (${_age}s old)"
+		st_warn "Telemetry stale (${_tel_age}s old)"
 	fi
 }
 
@@ -485,6 +605,26 @@ check_health
 check_capability
 check_assets
 check_safety
+
+# ── Telemetry diagnostic ─────────────────────────────────────────────────────
+# Deliberately narrow. This exists so a physical-device failure can be diagnosed from a
+# screenshot, which means it must carry enough to identify a contract problem and nothing that
+# would be unsafe to post in an issue.
+#
+# It prints ONLY: the path, the parser verdict, the detected schema version, the age, and whether
+# the producing daemon is the one running now. It never prints the payload — that carries the
+# focused package, pids, uids and thermal readings — and never prints a device identifier.
+echo ""
+echo "Telemetry diagnostic"
+echo "  path:   ${FLUX_TELEMETRY_FILE}"
+echo "  parser: ${_tel_state}"
+echo "  schema: ${_schema:-none} (expected ${FLUX_TELEMETRY_SCHEMA})"
+if [ -n "${_tel_age}" ]; then
+	echo "  age:    ${_tel_age}s (max ${FLUX_TELEMETRY_MAX_AGE}s)"
+else
+	echo "  age:    unknown"
+fi
+echo "  boot:   ${_tel_boot}"
 
 echo ""
 if [ "${_fail_count}" -gt 0 ]; then

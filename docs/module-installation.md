@@ -154,8 +154,8 @@ no tuning and enables no vendor capability. Capability certification happens on
 the device, in the execution engine, against the actual node set — long after the
 installer is gone. Every install therefore ends with:
 
-> Device-specific vendor capabilities remain validation-gated. Safe generic
-> behavior is used where a capability is not certified.
+> Device-specific capabilities remain validation-gated.
+> Reboot to start Flux.
 
 A device with no certified vendor capability is **not** a failed installation.
 
@@ -263,6 +263,43 @@ code. There is no `eval`, no constructed command, and no network tool in the
 script. Injection fixtures feed `$(...)`, backticks, `;`, `&&` and `|` payloads
 through `module.prop`, `soc_recognition`, `current_profile` and the telemetry
 snapshot, and assert that a canary file never appears.
+
+### The telemetry contract
+
+The snapshot at `/data/adb/.config/flux/synthesis_core.json` is the canonical path, and all four
+components agree on it: `Flux.hpp`'s `SYNTHESIS_CORE_FILE`, `Main.cpp`, `service.sh` (which passes
+it to SynthesisCore), and `webui/src/stores/Monitor.js`.
+
+**Despite the `.json` name, the wire format is not JSON.** Schema v2 is line-oriented
+`key<SPACE>value`, split on the *first* space only:
+
+```
+schema_version 2
+sequence 1487
+focused_package com.example.game
+```
+
+`schema_version` is a top-level field, its position in the file is not significant, and the
+accepted band is exactly v2 (`kSchemaMin` = `kSchemaMax` = 2). Duplicate keys are rejected
+outright, a trailing CR per line is stripped, and input is bounded at 64 KiB / 4 KiB per line /
+256 lines.
+
+SynthesisCore writes temp → fsync → rename, so the target is never partially visible. A truncated
+or empty snapshot is therefore a real fault, not a race — which is why the self-test does not
+retry.
+
+The self-test is shell and cannot link `TelemetryDecoder`, so it re-implements the tokenizer. That
+duplication once shipped a bug: it parsed `key=value` and reported a healthy device as
+`Telemetry snapshot malformed (no schema_version)`, and the fixtures were written in the same
+wrong format so they agreed with the bug. The corpus in `.github/fixtures/telemetry/` is now the
+single source of truth, read by **both** parsers — `jni/tests/TelemetryContractTest.cpp` decodes it
+with the production decoder, and `verify-installer.sh` §6 runs the self-test over it, asserting the
+same classification for all ten fixtures. Change the format, the tokenizer or the bounds, and one
+of the two goes red.
+
+Each state is reported as itself rather than collapsed: absent, permission-denied, empty,
+wrong-dialect (`key=value`), no schema field, non-numeric schema, legacy (below v2), unsupported
+(above v2), duplicate key, and stale.
 
 ### Honest gaps
 
