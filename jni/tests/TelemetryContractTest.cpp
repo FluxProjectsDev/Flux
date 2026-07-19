@@ -132,6 +132,17 @@ TEST("contract: empty input is rejected") {
     CHECK(verdict("empty.snapshot") == DecodeError::EmptyInput);
 }
 
+// Two dialects a mis-built producer could plausibly emit. Neither is the contract, and the
+// decoder must reject both rather than half-reading them — the `.json` filename in particular
+// makes real JSON an easy wrong guess for someone reimplementing the producer.
+TEST("contract: JSON is not the wire format despite the .json filename") {
+    CHECK(verdict("json-not-contract.snapshot") == DecodeError::MissingSchemaVersion);
+}
+
+TEST("contract: tab-separated is not the wire format") {
+    CHECK(verdict("tab-not-contract.snapshot") == DecodeError::MissingSchemaVersion);
+}
+
 // A duplicate key is rejected outright rather than resolved by first- or last-wins. The shell
 // self-test has to agree, or it would call a snapshot healthy that the runtime refuses.
 TEST("contract: a duplicate key is rejected outright") {

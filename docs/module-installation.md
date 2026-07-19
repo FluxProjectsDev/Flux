@@ -298,8 +298,16 @@ same classification for all ten fixtures. Change the format, the tokenizer or th
 of the two goes red.
 
 Each state is reported as itself rather than collapsed: absent, permission-denied, empty,
-wrong-dialect (`key=value`), no schema field, non-numeric schema, legacy (below v2), unsupported
-(above v2), duplicate key, and stale.
+wrong-dialect, no schema field, non-numeric schema, legacy (below v2), unsupported (above v2),
+duplicate key, and stale.
+
+The diagnostic also names the **dialect** it found — `space` (the contract), `key=value`, `json`
+or `tab` — whatever the outcome. SynthesisCore is a prebuilt APK that builds its lines with
+character appends, so its separator cannot be read out of the binary to confirm the contract
+independently; two devices hit the original parser bug and neither could be inspected from here.
+If a producer ever disagrees with the contract, the self-test output identifies it directly
+instead of costing another device round trip. Only the delimiter class and key names are printed,
+never a value.
 
 ### Honest gaps
 

@@ -663,7 +663,9 @@ for spec in \
 	"unsupported-schema:1:unsupported" \
 	"legacy-schema:1:legacy" \
 	"duplicate-schema:1:duplicate" \
-	"empty:1:empty"; do
+	"empty:1:empty" \
+	"json-not-contract:1:noschema" \
+	"tab-not-contract:1:noschema"; do
 	fixture="${spec%%:*}"
 	rest="${spec#*:}"
 	want_rc="${rest%%:*}"
@@ -680,7 +682,21 @@ for spec in \
 	[ "${RC}" = "${want_rc}" ] ||
 		fail "corpus ${fixture}: exit ${RC}, expected ${want_rc}"
 done
-green "  telemetry corpus: all 10 fixtures classified as the production decoder does"
+green "  telemetry corpus: all 12 fixtures classified as the production decoder does"
+
+# The dialect the producer is actually speaking is reported whatever the outcome, so a device that
+# disagrees with the contract identifies itself in its own output instead of costing another round
+# trip. Two devices hit the original bug and neither could be inspected from here.
+for spec in "valid-v2:space" "keyvalue-not-contract:key=value" "json-not-contract:json" \
+	"tab-not-contract:tab"; do
+	fixture="${spec%%:*}"
+	want="${spec##*:}"
+	T="${ROOT}/selftest-corpus-${fixture}"
+	got="$(sed -n 's/^  format: \([^ ]*\) .*/\1/p' "${T}/out.log" | head -1)"
+	[ "${got}" = "${want}" ] ||
+		fail "corpus ${fixture}: reported dialect '${got}', expected '${want}'"
+done
+green "  the diagnostic names the dialect it found (space / key=value / json / tab)"
 
 # The regression, named explicitly so it cannot be quietly re-broken: a healthy schema-v2 snapshot
 # must PASS, and a key=value file must NOT be mistaken for one.

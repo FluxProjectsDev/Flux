@@ -81,6 +81,8 @@ _fail_count=0
 _tel_raw=""
 _tel_state="unknown"
 _tel_boot="unknown"
+_tel_format="unknown"
+_tel_lines=""
 _tel_age=""
 _schema=""
 
@@ -336,6 +338,28 @@ check_synthesiscore() {
 		return
 	fi
 
+	# Detect the DIALECT the producer is actually speaking, and report it whatever the outcome.
+	#
+	# This exists because two physical devices reported the same telemetry failure and neither
+	# could be inspected from here. The contract is `key<SPACE>value`, established from the two
+	# production consumers (TelemetryDecoder.cpp and Monitor.js) — but SynthesisCore is a prebuilt
+	# APK that builds its lines with character appends, so its separator cannot be read out of the
+	# binary to confirm it independently. If a device ever disagrees, this line says so directly
+	# instead of costing another round trip.
+	#
+	# Only the SHAPE is reported: a delimiter class and a key name. Key names are fixed producer
+	# identifiers, never user data, and no value is ever printed.
+	_tel_first="$(printf '%s\n' "${_tel_raw}" | sed -n '/./{p;q;}')"
+	case "${_tel_first}" in
+	'{'* | '['*) _tel_format="json" ;;
+	*[a-z_]" "*) _tel_format="space" ;;
+	*[a-z_]"="*) _tel_format="key=value" ;;
+	*"$(printf '\t')"*) _tel_format="tab" ;;
+	'') _tel_format="blank" ;;
+	*) _tel_format="unknown" ;;
+	esac
+	_tel_lines="$(printf '%s\n' "${_tel_raw}" | grep -c .)"
+
 	# The production decoder rejects a duplicate key outright (DecodeError::DuplicateKey) rather
 	# than taking the first or the last. A shell reader that silently took the first would call a
 	# snapshot healthy that the runtime itself refuses — the self-test would then disagree with
@@ -355,6 +379,11 @@ check_synthesiscore() {
 		# for corruption when the real answer is that a producer is speaking the wrong dialect.
 		if grep -q '^schema_version=' "${FLUX_TELEMETRY_FILE}" 2>/dev/null; then
 			st_fail "Telemetry uses key=value, not the v2 format"
+			st_note "expected: schema_version <value>"
+		elif [ "${_tel_format}" != "space" ]; then
+			# Not the contract dialect at all — say which one, so the producer can be identified
+			# without another device round trip.
+			st_fail "Telemetry is ${_tel_format}, not the v2 format"
 			st_note "expected: schema_version <value>"
 		else
 			st_fail "Telemetry snapshot has no schema_version"
@@ -618,6 +647,7 @@ echo ""
 echo "Telemetry diagnostic"
 echo "  path:   ${FLUX_TELEMETRY_FILE}"
 echo "  parser: ${_tel_state}"
+echo "  format: ${_tel_format} (expected space), ${_tel_lines:-0} line(s)"
 echo "  schema: ${_schema:-none} (expected ${FLUX_TELEMETRY_SCHEMA})"
 if [ -n "${_tel_age}" ]; then
 	echo "  age:    ${_tel_age}s (max ${FLUX_TELEMETRY_MAX_AGE}s)"
