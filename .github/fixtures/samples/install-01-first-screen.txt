@@ -1,0 +1,30 @@
+- Loading Flux installer
+
+      __________________________
+    -'  . . . . . . . . . . .  \
+   /  . . . . . . . . .     ---\
+  |  . . . . .   ----------'
+  |     /
+  |    /     _____________
+  |   /    /  . . . . .  \
+  |  /    /  . . . .    \
+  | /    /    -------'
+  | .  /   ---
+  |. /
+  |/
+
+  _____  _
+ |  ___|| |  _   _  __  __
+ | |__  | | | | | | \ \/ /
+ |  __| | | | | | |  \  /
+ | |    | | | |_| |  /  \
+ |_|    |_|  \__,_| /_/\_\
+
+Adaptive Runtime Engine
+Hardware-aware | Verified | Reversible
+
+
+[1/8] Package integrity
+  [*] Verifying package...
+  [OK] Package integrity verified
+  [*] Installer components checksum-verified

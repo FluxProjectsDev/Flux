@@ -75,7 +75,7 @@ flux_apply_default_config() {
 			_added=$((_added + 1))
 		fi
 	done
-	flux_info "Configuration: ${_kept} existing file(s) preserved, ${_added} new default(s) added"
+	flux_info "Config: ${_kept} preserved, ${_added} added"
 	return 0
 }
 
@@ -141,9 +141,9 @@ flux_clean_legacy_artifacts() {
 	fi
 
 	if [ "${_removed}" -gt 0 ]; then
-		flux_step_ok "Removed ${_removed} stale artifact(s) from earlier Flux versions"
+		flux_step_ok "Removed ${_removed} stale artifact(s) removed"
 	else
-		flux_step_ok "No stale artifacts from earlier versions"
+		flux_step_ok "No stale artifacts found"
 	fi
 	return 0
 }
@@ -160,7 +160,7 @@ flux_migrate_existing() {
 		flux_step_warn "A previous installation did not finish; it will be replaced"
 		;;
 	upgrade)
-		flux_step_ok "Existing Flux installation detected; configuration will be preserved"
+		flux_step_ok "Existing install; config preserved"
 		;;
 	esac
 	return 0
@@ -171,7 +171,7 @@ flux_settle_config() {
 	_state="$(flux_classify_config)"
 	case "${_state}" in
 	valid)
-		flux_step_ok "Existing configuration is valid and was preserved"
+		flux_step_ok "Configuration preserved"
 		flux_apply_default_config
 		;;
 	malformed)

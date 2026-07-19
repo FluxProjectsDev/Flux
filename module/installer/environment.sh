@@ -134,7 +134,7 @@ flux_report_environment() {
 	flux_info "Android API: ${FLUX_API}"
 	flux_info "Architecture: ${FLUX_ABI} -> ${FLUX_ABI_DIR}"
 	case "${FLUX_INSTALL_MODE}" in
-	upgrade) flux_info "Mode: upgrade over an existing Flux install" ;;
+	upgrade) flux_info "Mode: Flux upgrade" ;;
 	incomplete) flux_info "Mode: repairing an incomplete previous install" ;;
 	*) flux_info "Mode: clean install" ;;
 	esac

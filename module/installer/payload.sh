@@ -40,7 +40,7 @@ flux_install_module_files() {
 	for _entry in ${FLUX_PAYLOAD_CRITICAL}; do
 		flux_extract_verified "${ZIPFILE}" "${_entry}" "${MODPATH}" critical
 	done
-	flux_step_ok "$(echo "${FLUX_PAYLOAD_CRITICAL}" | wc -w) critical file(s) extracted and checksum-verified"
+	flux_step_ok "$(echo "${FLUX_PAYLOAD_CRITICAL}" | wc -w) payload file(s) verified"
 
 	_optional_missing=""
 	for _entry in ${FLUX_PAYLOAD_OPTIONAL}; do
@@ -52,7 +52,7 @@ flux_install_module_files() {
 		flux_step_warn "Branding asset(s) unavailable:${_optional_missing}"
 		flux_info "The module works normally; the manager shows its default card."
 	else
-		flux_step_ok "Branding assets extracted and checksum-verified"
+		flux_step_ok "Branding assets verified"
 	fi
 
 	# The manager rewrites module.prop's description at runtime to show live status, so the
@@ -96,7 +96,7 @@ flux_install_webui() {
 			"Re-download Flux and flash it again."
 
 	_count="$(find "${MODPATH}/webroot" -type f 2>/dev/null | wc -l)"
-	flux_step_ok "WebUI installed (${_count} files, entry point verified)"
+	flux_step_ok "WebUI installed and verified (${_count})"
 
 	# webuiIcon in module.prop points here. Its absence costs only the card icon.
 	if [ -s "${MODPATH}/webroot/icon.webp" ]; then
@@ -125,6 +125,6 @@ flux_stage_config() {
 	[ "${_count}" -gt 0 ] ||
 		flux_abort "The package's configuration payload is empty" \
 			"config/ contains no files."
-	flux_step_ok "Default configuration staged (${_count} file(s))"
+	flux_step_ok "Default config staged (${_count} file(s))"
 	return 0
 }

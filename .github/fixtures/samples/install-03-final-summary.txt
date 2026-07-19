@@ -1,0 +1,22 @@
+  [OK] Ownership and modes applied
+  [OK] Runtime binaries verified executable
+  [OK] Lifecycle scripts verified executable
+  [*] Config: 0 preserved, 1 added
+  [OK] Game list initialised
+
+[8/8] Final verification
+  [OK] module.prop verified (flux, code 999)
+  [OK] All critical components present
+  [OK] No legacy profiler payload present
+  [OK] Asset references resolve
+  [OK] No scratch files left behind
+  [*] SoC family detected: Snapdragon
+
+--------------------------------------
+  [OK] Flux installed successfully.
+
+  Device-specific capabilities remain
+  validation-gated.
+  Reboot to start Flux.
+--------------------------------------
+

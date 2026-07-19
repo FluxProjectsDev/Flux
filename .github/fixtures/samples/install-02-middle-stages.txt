@@ -1,0 +1,30 @@
+  [OK] Installer stub checksum verified
+
+[2/8] Installation environment
+  [*] Manager: Magisk (27.0)
+  [*] Android API: 33
+  [*] Architecture: arm64 -> arm64-v8a
+  [*] Mode: clean install
+  [OK] Module manager recognised
+
+[3/8] Architecture and Android compatibility
+  [OK] Android API 33 meets the minimum (28)
+  [OK] Architecture arm64-v8a supported
+
+[4/8] Existing installation and configuration
+  [OK] No stale artifacts found
+  [OK] No previous installation detected
+
+[5/8] Runtime and SynthesisCore payload
+  [OK] 6 payload file(s) verified
+  [OK] Branding assets verified
+  [OK] Runtime installed for arm64-v8a
+  [OK] Diagnostics utility installed
+  [OK] Default config staged (1 file(s))
+
+[6/8] WebUI and module metadata
+  [OK] WebUI installed and verified (2)
+  [OK] WebUI icon present
+  [*] Magisk: mount provides PATH
+
+[7/8] Permissions and configuration

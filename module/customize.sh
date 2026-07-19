@@ -60,7 +60,7 @@ flux_info "Verifying package..."
 flux_integrity_init || flux_abort "Cannot create the verification work directory" \
 	"TMPDIR is not writable."
 flux_step_ok "Package integrity verified"
-flux_info "Installer components matched their published checksums"
+flux_info "Installer components checksum-verified"
 _ub_state="$(flux_check_update_binary)"
 case "${_ub_state}" in
 verified) flux_step_ok "Installer stub checksum verified" ;;
@@ -86,7 +86,7 @@ fi
 flux_step_begin "Architecture and Android compatibility"
 flux_check_android_version
 flux_step_ok "Android API ${FLUX_API} meets the minimum (${FLUX_MIN_API})"
-flux_step_ok "Architecture ${FLUX_ABI} is supported (payload: ${FLUX_ABI_DIR})"
+flux_step_ok "Architecture ${FLUX_ABI_DIR} supported"
 
 # ── [4/8] Existing installation and configuration ────────────────────────────
 flux_step_begin "Existing installation and configuration"

@@ -38,7 +38,7 @@ FLUX_UI_MARK_STEP="[*]"
 FLUX_UI_MARK_OK="[OK]"
 FLUX_UI_MARK_WARN="[WARN]"
 FLUX_UI_MARK_FAIL="[FAIL]"
-FLUX_UI_RULE="---------------------------------------------"
+FLUX_UI_RULE="--------------------------------------"
 
 FLUX_STAGE_TOTAL=8
 FLUX_STAGE_CURRENT=0
@@ -96,6 +96,48 @@ flux_ui_init() {
 FLUX_BANNER_WIDTH=40
 FLUX_BANNER_COMPACT_WIDTH=25
 
+# The default emblem: the same approved identity as the reference art below, drawn at half its
+# height. This is what a device actually shows.
+#
+# It is proportional, not truncated — the long upper ribbon, the vertical left spine, the diagonal
+# inner cut, the smaller lower ribbon, the segmented outline and the down-left taper are all still
+# here, with the dotted texture thinned so it reads rather than fills at this size. 12 lines and
+# 32 columns, against the reference's 24 and 40.
+#
+# Why this is the default and the tall one is not: at 36 lines the branding block was most of two
+# screens on a phone, so stage 1 opened below the fold and the first thing a user saw of an
+# install was scrollback. The whole block is now 24 lines, which puts stage 1 on the first screen
+# of a common mobile module-manager terminal.
+flux_banner_default() {
+	while IFS= read -r _flux_line; do
+		ui_print "${_flux_line}"
+	done <<'FLUX_ASCII_LOGO_DEFAULT'
+      __________________________
+    -'  . . . . . . . . . . .  \
+   /  . . . . . . . . .     ---\
+  |  . . . . .   ----------'
+  |     /
+  |    /     _____________
+  |   /    /  . . . . .  \
+  |  /    /  . . . .    \
+  | /    /    -------'
+  | .  /   ---
+  |. /
+  |/
+
+  _____  _
+ |  ___|| |  _   _  __  __
+ | |__  | | | | | | \ \/ /
+ |  __| | | | | | |  \  /
+ | |    | | | |_| |  /  \
+ |_|    |_|  \__,_| /_/\_\
+FLUX_ASCII_LOGO_DEFAULT
+}
+
+# The full-height reference emblem. NOT the normal installer output — it is reachable only by
+# setting FLUX_BANNER_VERBOSE=1, and is kept because it is the most complete ASCII statement of
+# the approved mark and the thing flux_banner_default is a proportional reduction OF. Its golden
+# fixture stays too, so the reference cannot rot unnoticed.
 flux_banner_detailed() {
 	while IFS= read -r _flux_line; do
 		ui_print "${_flux_line}"
@@ -167,15 +209,24 @@ FLUX_ASCII_LOGO_COMPACT
 # printed the full strapline underneath would wrap anyway and have accomplished nothing. The
 # narrow tiers therefore break the strapline up as well.
 #
-#   tier      art  widest line  selected when
-#   detailed   40      40       COLUMNS unset, or >= 40
-#   compact    22      25       25 <= COLUMNS < 40
-#   plain       4      16       COLUMNS < 25
+#   tier      art  widest line  block  selected when
+#   verbose    40      40         36    FLUX_BANNER_VERBOSE=1 (never automatic)
+#   default    32      38         24    COLUMNS unset, or >= 40
+#   compact    22      25         22    25 <= COLUMNS < 40
+#   plain       4      16          5    COLUMNS < 25
+#
+# `block` is the whole branding block including blank lines and the strapline, because that — not
+# the art alone — is what decides whether stage 1 lands on the first screen.
 flux_print_banner() {
 	ui_print ""
 	_cols="${COLUMNS:-0}"
-	if [ "${_cols}" -le 0 ] || [ "${_cols}" -ge "${FLUX_BANNER_WIDTH}" ]; then
+	if [ "${FLUX_BANNER_VERBOSE:-0}" = "1" ]; then
 		flux_banner_detailed
+		ui_print ""
+		ui_print "Adaptive Runtime Engine"
+		ui_print "Hardware-aware | Verified | Reversible"
+	elif [ "${_cols}" -le 0 ] || [ "${_cols}" -ge "${FLUX_BANNER_WIDTH}" ]; then
+		flux_banner_default
 		ui_print ""
 		ui_print "Adaptive Runtime Engine"
 		ui_print "Hardware-aware | Verified | Reversible"
@@ -273,14 +324,21 @@ flux_summary() {
 		ui_print "  ${FLUX_UI_MARK_OK} Flux installed successfully."
 	fi
 	ui_print ""
-	# Said on every install, including the clean one. Flux gates vendor-specific capability
-	# behind runtime validation on the device; the installer has not applied any tuning and must
-	# not imply that it has.
-	ui_print "  Device-specific vendor capabilities remain"
-	ui_print "  validation-gated. Safe generic behavior is used"
-	ui_print "  where a capability is not certified."
-	ui_print ""
-	ui_print "  Reboot to start the Flux runtime."
+	# Said on every install, including the clean one. Flux gates vendor-specific capability behind
+	# runtime validation on the device; the installer has not applied any tuning and must not imply
+	# that it has. Shortened from five lines to two — the "safe generic behavior" sentence restated
+	# what validation-gated already means, and the runtime status page says it properly.
+	ui_print "  Device-specific capabilities remain"
+	ui_print "  validation-gated."
+	ui_print "  Reboot to start Flux."
 	ui_print "${FLUX_UI_RULE}"
 	ui_print ""
 }
+
+# This is the ONLY success line Flux emits, and flux_summary is the only place it can come from.
+#
+# A flash also shows "Done", "Installation complete" and "Module installed successfully!" — none
+# of those are Flux's. They come from `install_module` in the manager's own util_functions.sh,
+# invoked by META-INF/.../update-binary, and they are manager-owned UI. Flux does not try to
+# suppress them: a module that rewrites its manager's install chrome is a module that breaks on
+# the next manager release, and the duplication is cosmetic and outside this module's control.

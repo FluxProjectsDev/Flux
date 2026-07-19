@@ -41,7 +41,7 @@ flux_configure_manager_integration() {
 	case "${FLUX_MANAGER}" in
 	KernelSU | APatch)
 		touch "${MODPATH}/skip_mount"
-		flux_info "${FLUX_MANAGER}: module mount skipped; binaries exposed by symlink"
+		flux_info "${FLUX_MANAGER}: binaries exposed by symlink"
 
 		_linked=0
 		for _dir in ${FLUX_MANAGER_BIN_DIRS}; do
@@ -54,16 +54,16 @@ flux_configure_manager_integration() {
 		done
 
 		if [ "${_linked}" -gt 0 ]; then
-			flux_step_ok "Runtime linked into ${_linked} manager PATH director(y/ies)"
+			flux_step_ok "Runtime linked to manager PATH (${_linked})"
 		else
 			# Not fatal: the module directory is still mounted for the manager's own use, and
 			# service.sh invokes the daemon by path. Only the interactive `fluxd` command from a
 			# shell is lost, so this is a limitation, not a failure.
-			flux_step_warn "No manager PATH directory found; 'fluxd' will not be on \$PATH"
+			flux_step_warn "No manager PATH dir; fluxd not on \$PATH"
 		fi
 		;;
 	Magisk)
-		flux_info "Magisk: module mount provides system/bin on PATH"
+		flux_info "Magisk: mount provides PATH"
 		;;
 	*)
 		flux_info "Unknown manager: relying on the standard module mount"
@@ -101,7 +101,7 @@ flux_verify_module_prop() {
 		;;
 	esac
 
-	flux_step_ok "module.prop verified (id=${_id}, version=${_version}, code=${_code})"
+	flux_step_ok "module.prop verified (${_id}, code ${_code})"
 	return 0
 }
 
@@ -121,7 +121,7 @@ flux_verify_asset_metadata() {
 		flux_step_warn "module.prop references missing asset(s):${_dangling}"
 		flux_info "The manager falls back to its default card artwork."
 	else
-		flux_step_ok "All module.prop asset references resolve"
+		flux_step_ok "Asset references resolve"
 	fi
 	return 0
 }
@@ -136,7 +136,7 @@ flux_verify_installed_tree() {
 	flux_verify_installed "${MODPATH}/synthesiscore.apk" "SynthesisCore telemetry provider"
 	flux_verify_installed "${MODPATH}/webroot/index.html" "WebUI entry point"
 	flux_verify_installed "${FLUX_CONFIG_DIR}/gamelist.json" "game list"
-	flux_step_ok "All critical components present in the installed module"
+	flux_step_ok "All critical components present"
 
 	# The legacy shell applier must not be reachable. The V2 ExecutionEngine is the only write
 	# path; a runnable copy of the old one on disk is a way back to it.
@@ -162,7 +162,7 @@ flux_verify_clean_tree() {
 	if [ -n "${_junk}" ]; then
 		flux_step_warn "Installer scratch files remained:${_junk}"
 	else
-		flux_step_ok "No installer scratch files in the installed module"
+		flux_step_ok "No scratch files left behind"
 	fi
 	return 0
 }

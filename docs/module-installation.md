@@ -89,17 +89,32 @@ Hardware-aware | Verified | Reversible
 
 and then goes straight to real work. The art is a fixed, reviewed constant in
 `module/installer/ui.sh` (a quoted heredoc, so nothing in it is expanded), held to
-a byte-for-byte golden fixture in CI. Three width tiers exist, each no wider than
-the width that selects it:
+a byte-for-byte golden fixture in CI. Each tier is no wider than the width that
+selects it, and the whole branding block — art, blank lines and strapline — is
+counted, because that is what decides whether stage 1 lands on the first screen:
 
-| Tier | Art | Widest line | Selected when |
-|---|---|---|---|
-| detailed | 40 x 31 | 40 | `COLUMNS` unset, or >= 40 |
-| compact | 22 x 16 | 25 | 25 <= `COLUMNS` < 40 |
-| plain | 4 x 1 | 16 | `COLUMNS` < 25 |
+| Tier | Art | Widest line | Block | Selected when |
+|---|---|---|---|---|
+| verbose | 40 x 24 | 40 | 36 | `FLUX_BANNER_VERBOSE=1`, never automatic |
+| default | 32 x 12 | 38 | 24 | `COLUMNS` unset, or >= 40 |
+| compact | 22 x 16 | 25 | 22 | 25 <= `COLUMNS` < 40 |
+| plain | 4 x 1 | 16 | 5 | `COLUMNS` < 25 |
 
-The detailed emblem is the default: recovery and module managers essentially never
-set `COLUMNS`, and an unset width means "not reported", so it takes the full art.
+The **default** tier is what a device shows: recovery and module managers
+essentially never set `COLUMNS`, and an unset width means "not reported". It is a
+proportional reduction of the reference art, not a truncation — the long upper
+ribbon, left spine, diagonal inner cut, smaller lower ribbon, segmented outline and
+down-left taper are all still present, with the dotted texture thinned so it reads
+at half height.
+
+The full-height `verbose` tier is kept as the reference form and is reachable only
+by setting `FLUX_BANNER_VERBOSE=1`. It was previously the default, at which point
+the branding block was 36 lines — most of two screens on a phone, so stage 1 opened
+below the fold and the first thing a user saw of an install was scrollback. CI
+asserts the default block stays within 24 lines by 40 columns, and that the
+full-height art is not what the default path emits.
+
+Captured transcripts are in `.github/fixtures/samples/`.
 
 There are no sleeps, no spinners and no progress animation. Output is plain ASCII
 with `[*]`/`[OK]`/`[WARN]`/`[FAIL]` markers, switching to Unicode only when a
