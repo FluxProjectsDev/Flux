@@ -30,21 +30,35 @@ load-bearing, not incidental.
 ignores all three** and renders its stock module card — that is not a failure and
 Flux does not claim otherwise.
 
-Assets are generated, not hand-exported:
+The two kinds of asset have different provenance, and are proven differently.
+
+**The banner is approved artwork, not generated.** `module/assets/branding/banner.webp`
+(1280x720) is a direct conversion of a source the maintainer approved — decode,
+proportional resize, WebP encode, nothing else. The approved original is supplied
+out of band and is deliberately untracked (`.user-assets/` is git-ignored): it must
+never reach the module ZIP. Do **not** redraw it, recolour it, or regenerate it from
+coordinates. To change it, re-convert from the approved source and re-pin the hash in
+`scripts/verify-branding.py`.
+
+**The icons are generated:**
 
 ```
-python3 scripts/render-banner.py     # module/assets/branding/banner.{svg,webp}  1280x640
 python3 scripts/render-icons.py      # module/assets/icons/{action,donate}.{svg,webp}  192x192
 ```
 
-Each script also takes `--check`, which regenerates into a temp directory and
-compares against what is committed — rasters by decoded pixel content, SVG byte
-for byte. Pixels rather than bytes because WebP encoding is not stable across
-libwebp versions, and a check that goes red on a dependency upgrade while the
+`--check` regenerates into a temp directory and compares against what is committed —
+rasters by decoded pixel content, SVG byte for byte.
+
+```
+python3 scripts/verify-branding.py   # the banner's decoded identity + module.prop paths
+```
+
+Both use decoded pixels rather than file bytes, because WebP encoding is not stable
+across libwebp versions, and a check that goes red on a dependency upgrade while the
 artwork is unchanged is one people learn to silence. CI runs both, so the packaged
-artwork cannot drift from its source. `module/assets/` is the editable source tree and is
-**not** packaged; the build copies each raster to the flat module-root path its
-metadata key names.
+artwork cannot drift. `module/assets/` is the editable source tree and is **not**
+packaged; the build copies each raster to the flat module-root path its metadata key
+names.
 
 ## What you see while flashing
 

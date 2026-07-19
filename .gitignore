@@ -6,3 +6,12 @@ libs/
 
 # Host test suite output (jni/tests/run_tests.sh)
 jni/tests/build/
+
+# Maintainer-supplied approved branding sources.
+#
+# The approved banner/logo artwork is supplied out of band and converted into the packaged assets
+# under module/assets/. The originals are large, are not the project's to redistribute from here,
+# and must never reach the module ZIP — so they stay untracked rather than living in the tree.
+# scripts/verify-branding.py deliberately validates the committed conversion instead of these,
+# because CI has no access to them.
+.user-assets/
