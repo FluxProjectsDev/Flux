@@ -46,7 +46,8 @@ FLUX_ISSUES_URL="https://github.com/FluxProjectsDev/Flux/issues"
 #
 # Setting this enables every donate path at once, and nothing else needs to change:
 #   - compile_zip.sh appends `donate=` and `donateIcon=` to module.prop
-#   - action.sh opens it from the Action button on KernelSU and APatch
+#   - the manager's own `$` button opens it from module.prop's donate key; no Flux script is
+#     involved, and action.sh deliberately does not open it (Action runs the self-test)
 #   - the WebUI's support entry points here
 #
 # Clearing it back to "" disables all three again, and the fixtures cover both states.

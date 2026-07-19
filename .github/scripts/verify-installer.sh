@@ -161,7 +161,11 @@ run_install() {
 		export MODPATH="${case_root}/modpath"
 		export TMPDIR="${case_root}/tmp"
 		export ZIPFILE="${zip}"
+		# Subshell-scoped deliberately, same as the self-test fixtures below: each install case
+		# must see only its own tree.
+		# shellcheck disable=SC2030,SC2031
 		export FLUX_MODULE_DIR="${case_root}/installed"
+		# shellcheck disable=SC2030,SC2031
 		export FLUX_CONFIG_DIR="${case_root}/config"
 		export FLUX_MANAGER_BIN_DIRS="${case_root}/ap/bin ${case_root}/ksu/bin"
 		export ARCH="arm64" API="33"
@@ -457,137 +461,431 @@ fi
 grep -q "validation-gated" "${REF_LOG}" ||
 	fail "the summary does not state that vendor capabilities remain validation-gated"
 
-# ═══ 6. Action button and Donate/Support ═════════════════════════════════════
-head2 "6. Action button and Donate/Support"
+# ═══ 6. Action button: the Flux self-test ════════════════════════════════════
+head2 "6. Action button (Flux self-test)"
 
-# action.sh must SURVIVE on the two managers that actually have an Action button. customize.sh
-# used to delete it on exactly those, which is the regression this pins.
+# action.sh must SURVIVE on the managers that have an Action button. customize.sh used to delete
+# it on exactly those, which is the regression this pins.
 for mgr in ksu apatch magisk unknown; do
 	[ -s "$(case_root_of "${mgr}")/modpath/action.sh" ] ||
 		fail "action.sh was not installed on ${mgr}"
 done
 green "  action.sh is installed on Magisk, KernelSU, APatch and an unknown manager"
 
-# run_action <name> <config-donation-url> <env assignments...>
-# Runs the shipped action.sh with a stubbed Activity Manager that records what it was asked to
-# open, so the assertions are about the intent actually issued rather than about the script text.
-run_action() {
-	local name="$1" donate="$2"
-	shift 2
-	local ar="${ROOT}/action-${name}"
-	rm -rf "${ar}"
-	mkdir -p "${ar}/mod/installer" "${ar}/bin"
+# st_tree <name> — a healthy installed module, plus its config dir. Echoes "<mod> <cfg>".
+# Every negative case below starts from this and breaks exactly one thing, so a failure names the
+# thing that was broken rather than a difference between two hand-built trees.
+st_tree() {
+	local r="${ROOT}/selftest-$1"
+	rm -rf "${r}"
+	mkdir -p "${r}/mod/system/bin" "${r}/mod/webroot" "${r}/cfg"
 
-	cp module/action.sh "${ar}/mod/action.sh"
-	sed "s|^OFFICIAL_DONATION_URL=.*|OFFICIAL_DONATION_URL=\"${donate}\"|" \
-		module/installer/config.sh >"${ar}/mod/installer/config.sh"
+	cp module/action.sh "${r}/mod/action.sh"
+	cp module/service.sh module/uninstall.sh module/cleanup.sh "${r}/mod/"
 
-	cat >"${ar}/bin/am" <<AMEOF
-#!/bin/sh
-printf '%s\n' "\$*" >>"${ar}/am.calls"
-exit 0
-AMEOF
-	cat >"${ar}/bin/pm" <<'PMEOF'
-#!/bin/sh
-# No WebUI viewer is installed, so the Magisk path falls through to its release-page hint.
-exit 1
-PMEOF
-	chmod +x "${ar}/bin/am" "${ar}/bin/pm"
-	: >"${ar}/am.calls"
+	cat >"${r}/mod/module.prop" <<'PROPEOF'
+id=flux
+name=Flux
+version=1.0.0 (999-testfix-release)
+versionCode=999
+banner=banner.webp
+webuiIcon=webroot/icon.webp
+actionIcon=action.webp
+donateIcon=donate.webp
+PROPEOF
 
-	(
-		# A minimal PATH containing only the stubs plus the real coreutils this script uses.
-		# Subshell-local is the intent, not an oversight: the stub `am` and `pm` must not leak
-		# into the rest of this script, or a later fixture would silently exercise them.
-		# shellcheck disable=SC2030
-		export PATH="${ar}/bin:/usr/bin:/bin"
-		for assign in "$@"; do export "${assign?}"; done
-		sh "${ar}/mod/action.sh"
-	) >"${ar}/out.log" 2>&1
-	echo "${ar}"
+	# A minimal but REAL ELF header: e_machine at offset 18 is b7 00, i.e. AArch64. The self-test
+	# reads those two bytes rather than trusting the install path, so the fixture must carry them.
+	printf '\177ELF\002\001\001\000\000\000\000\000\000\000\000\000\002\000\267\000' \
+		>"${r}/mod/system/bin/fluxd"
+	chmod +x "${r}/mod/system/bin/fluxd"
+
+	printf 'PK\003\004synthesiscore-stub' >"${r}/mod/synthesiscore.apk"
+	printf '<!doctype html><title>Flux</title>\n' >"${r}/mod/webroot/index.html"
+	for f in banner.webp action.webp donate.webp webroot/icon.webp; do
+		printf 'stub' >"${r}/mod/${f}"
+	done
+
+	printf 'schema_version=2\ncpu_temp=42.0\nbattery_temp=31.5\n' >"${r}/cfg/synthesis_core.json"
+	printf '3\n' >"${r}/cfg/current_profile"
+	printf 'snapdragon\n' >"${r}/cfg/soc_recognition"
+
+	chmod 755 "${r}/mod" "${r}/cfg"
+	echo "${r}"
 }
 
-DONATE_URL="https://example.org/flux-support"
+# st_run <tree-root> [env assignments...] — runs the self-test, captures output and exit code.
+# ABI is pinned so the fixture does not inherit the host's (absent) ro.product.cpu.abi and quietly
+# skip the ABI match on every case.
+st_run() {
+	local r="$1"
+	shift
+	(
+		# Subshell-scoped ON PURPOSE: each fixture must see only its own tree, and a leaked
+		# FLUX_MODULE_DIR would make a later case silently test the previous case's module.
+		# shellcheck disable=SC2030,SC2031
+		export FLUX_MODULE_DIR="${r}/mod"
+		# shellcheck disable=SC2030,SC2031
+		export FLUX_CONFIG_DIR="${r}/cfg"
+		# shellcheck disable=SC2030,SC2031
+		export PATH="${r}/bin:${PATH}"
+		for assign in "$@"; do export "${assign?}"; done
+		sh "${r}/mod/action.sh"
+	) >"${r}/out.log" 2>&1
+	echo $?
+}
 
-# A. Donation configured, manager with a native WebUI -> Action opens Support.
-AR="$(run_action ksu-configured "${DONATE_URL}" "KSU=true" "KSU_VER_CODE=11986")"
-grep -qF "${DONATE_URL}" "${AR}/am.calls" ||
-	fail "KernelSU with a configured donation URL did not open it (am calls: $(cat "${AR}/am.calls"))"
-grep -qF "android.intent.action.VIEW" "${AR}/am.calls" ||
-	fail "the donation link was not opened with an explicit VIEW intent"
-green "  KernelSU + configured URL: Action opens Support via an explicit VIEW intent"
+# A fake getprop so the ABI check has something deterministic to compare against, and a `pidof`
+# that reports the daemon as absent unless a case says otherwise.
+st_stub() {
+	local r="$1" abi="$2" daemon="$3"
+	mkdir -p "${r}/bin"
+	cat >"${r}/bin/getprop" <<GPEOF
+#!/bin/sh
+[ "\$1" = "ro.product.cpu.abi" ] && echo "${abi}"
+exit 0
+GPEOF
+	cat >"${r}/bin/pidof" <<PDEOF
+#!/bin/sh
+exit ${daemon}
+PDEOF
+	chmod +x "${r}/bin/getprop" "${r}/bin/pidof"
+}
 
-AR="$(run_action apatch-configured "${DONATE_URL}" "KSU=true" "APATCH=true")"
-grep -qF "${DONATE_URL}" "${AR}/am.calls" ||
-	fail "APatch with a configured donation URL did not open it"
-green "  APatch + configured URL: Action opens Support (not misrouted as KernelSU)"
-
-# B. No donation configured -> nothing is opened, and the script still succeeds.
-AR="$(run_action ksu-unconfigured "" "KSU=true")"
-if [ -s "${AR}/am.calls" ]; then
-	fail "with no donation URL configured, action.sh still opened something: $(cat "${AR}/am.calls")"
+# ── A. Healthy installation ──────────────────────────────────────────────────
+T="$(st_tree healthy)"
+st_stub "${T}" arm64-v8a 0
+RC="$(st_run "${T}")"
+if grep -q '^\[FAIL\]' "${T}/out.log"; then
+	fail "a healthy installation reported a FAIL:"
+	grep '^\[FAIL\]' "${T}/out.log" | sed 's/^/    /' >&2
 else
-	green "  No URL configured: nothing is opened at all"
+	green "  healthy install: no FAIL lines"
 fi
-grep -qi "does not currently have an official donation page" "${AR}/out.log" ||
-	fail "the unconfigured case does not tell the user plainly that there is no donation page"
-grep -qF "https://github.com/FluxProjectsDev/Flux" "${AR}/out.log" ||
-	fail "the unconfigured case does not offer the repository as the alternative"
+grep -q "Flux daemon active" "${T}/out.log" ||
+	fail "healthy install did not detect the running daemon"
+grep -q "Telemetry schema v2" "${T}/out.log" ||
+	fail "healthy install did not accept the schema-v2 snapshot"
+# Vendor capability is gated on every device that is not certified, which today is all of them,
+# so PASS WITH LIMITATIONS (exit 2) is the healthy outcome and a plain PASS is not yet reachable.
+[ "${RC}" = "2" ] ||
+	fail "healthy install exited ${RC}, expected 2 (PASS WITH LIMITATIONS)"
+grep -q "^Result: PASS WITH LIMITATIONS" "${T}/out.log" ||
+	fail "healthy install did not report PASS WITH LIMITATIONS"
+green "  healthy install: PASS WITH LIMITATIONS, exit 2"
 
-# C. Magisk has no WebUI button, so Action must spend itself on the WebUI instead.
-AR="$(run_action magisk "${DONATE_URL}" "MAGISKTMP=/sbin/.magisk")"
-grep -qF "${DONATE_URL}" "${AR}/am.calls" &&
-	fail "Magisk Action opened the donation page; it must open the WebUI"
-grep -qi "webui" "${AR}/out.log" ||
-	fail "Magisk Action did not attempt to open the WebUI"
-green "  Magisk: Action opens the WebUI, which the card cannot otherwise reach"
-
-# D. MMRL opens the WebUI from the card; the script must not fight it.
-AR="$(run_action mmrl "${DONATE_URL}" "MMRL=1")"
-if [ -s "${AR}/am.calls" ]; then
-	fail "under MMRL, action.sh started an activity instead of deferring to the card"
+# ── B. The self-test WRITES NOTHING ──────────────────────────────────────────
+# The whole point of the button. A manifest of every file's path, size, mode and content digest is
+# taken before and after; anything created, deleted, resized, chmod-ed or rewritten shows up.
+st_manifest() {
+	find "$1" -type f -exec sha256sum {} + 2>/dev/null | sort
+	find "$1" \( -type f -o -type d \) -printf '%p %m\n' 2>/dev/null | sort
+}
+T="$(st_tree readonly)"
+st_stub "${T}" arm64-v8a 0
+st_manifest "${T}/mod" >"${T}/before-mod.txt"
+st_manifest "${T}/cfg" >"${T}/before-cfg.txt"
+st_run "${T}" >/dev/null
+st_manifest "${T}/mod" >"${T}/after-mod.txt"
+st_manifest "${T}/cfg" >"${T}/after-cfg.txt"
+if diff -q "${T}/before-mod.txt" "${T}/after-mod.txt" >/dev/null 2>&1 &&
+	diff -q "${T}/before-cfg.txt" "${T}/after-cfg.txt" >/dev/null 2>&1; then
+	green "  the self-test modified nothing (content, size and mode all unchanged)"
 else
-	green "  MMRL: defers to the module card, starts nothing"
+	fail "the self-test WROTE to the module or config tree:"
+	diff "${T}/before-mod.txt" "${T}/after-mod.txt" | head -10 >&2
+	diff "${T}/before-cfg.txt" "${T}/after-cfg.txt" | head -10 >&2
 fi
 
-# E. Activity Manager unavailable -> graceful, and the URL is still shown.
-AR_NOAM="${ROOT}/action-noam"
-rm -rf "${AR_NOAM}"
-mkdir -p "${AR_NOAM}/mod/installer" "${AR_NOAM}/bin"
-cp module/action.sh "${AR_NOAM}/mod/action.sh"
-sed "s|^OFFICIAL_DONATION_URL=.*|OFFICIAL_DONATION_URL=\"${DONATE_URL}\"|" \
-	module/installer/config.sh >"${AR_NOAM}/mod/installer/config.sh"
-(
-	# No `am` on PATH at all. Scoped to this subshell for the same reason as above.
-	# shellcheck disable=SC2031
-	export PATH="${AR_NOAM}/bin:/usr/bin:/bin"
-	export KSU=true
-	sh "${AR_NOAM}/mod/action.sh"
-) >"${AR_NOAM}/out.log" 2>&1
-NOAM_RC=$?
-[ "${NOAM_RC}" -eq 0 ] || fail "action.sh exited ${NOAM_RC} when the Activity Manager was absent"
-grep -qF "${DONATE_URL}" "${AR_NOAM}/out.log" ||
-	fail "with no Activity Manager, the URL was not printed for the user to open manually"
-green "  Activity Manager absent: exits cleanly and prints the URL instead"
+# It must also never open a URL — the donation page now has its own manager button, and an Action
+# that opened it would be the behaviour this change removed.
+T="$(st_tree nourl)"
+st_stub "${T}" arm64-v8a 0
+mkdir -p "${T}/bin"
+cat >"${T}/bin/am" <<AMEOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"${T}/am.calls"
+exit 0
+AMEOF
+chmod +x "${T}/bin/am"
+: >"${T}/am.calls"
+st_run "${T}" >/dev/null
+if [ -s "${T}/am.calls" ]; then
+	fail "the self-test issued an intent: $(cat "${T}/am.calls")"
+else
+	green "  no intent issued, no URL opened, nothing uploaded"
+fi
+grep -qF "sociabuzz.com" "${T}/out.log" &&
+	fail "the self-test printed the donation URL; that button is the manager's \$ action now"
 
-# F. No arbitrary URL and no shell execution surface.
-# Comment lines are stripped first. The file's own header states "No eval", and matching the
-# raw text would flag that sentence — a check that fails on its own documentation trains people
-# to ignore it.
+# ── C. Daemon inactive — a WARN, not a FAIL ──────────────────────────────────
+# The state between flashing and rebooting. Telling a user their install FAILED here would send
+# them to reflash over something a reboot fixes.
+T="$(st_tree nodaemon)"
+st_stub "${T}" arm64-v8a 1
+RC="$(st_run "${T}")"
+grep -q "^\[WARN\] Flux daemon not running" "${T}/out.log" ||
+	fail "an inactive daemon was not reported as a WARN"
+grep -q '^\[FAIL\]' "${T}/out.log" &&
+	fail "an inactive daemon produced a FAIL; it must not be critical"
+[ "${RC}" = "2" ] || fail "inactive daemon exited ${RC}, expected 2"
+green "  daemon inactive: WARN, exit 2, no FAIL"
+
+# ── D. Stale telemetry — a WARN ──────────────────────────────────────────────
+T="$(st_tree stale)"
+st_stub "${T}" arm64-v8a 0
+touch -d '1 hour ago' "${T}/cfg/synthesis_core.json" 2>/dev/null ||
+	touch -t 200001010000 "${T}/cfg/synthesis_core.json"
+RC="$(st_run "${T}")"
+grep -q "^\[WARN\] Telemetry stale" "${T}/out.log" ||
+	fail "stale telemetry was not reported (out: $(grep -i telemetry "${T}/out.log" | tr '\n' ' '))"
+[ "${RC}" = "2" ] || fail "stale telemetry exited ${RC}, expected 2"
+green "  stale telemetry: WARN, exit 2"
+
+# ── E. Malformed telemetry — reported safely, never parsed as data ───────────
+for spec in "noschema:cpu_temp=42.0" "textschema:schema_version=abc" "injectschema:schema_version=2; rm -rf /"; do
+	name="${spec%%:*}"
+	body="${spec#*:}"
+	T="$(st_tree "malformed-${name}")"
+	st_stub "${T}" arm64-v8a 0
+	printf '%s\n' "${body}" >"${T}/cfg/synthesis_core.json"
+	RC="$(st_run "${T}")"
+	grep -qE "^\[FAIL\] Telemetry (snapshot|schema) malformed" "${T}/out.log" ||
+		fail "malformed telemetry (${name}) was not reported as malformed"
+	[ "${RC}" = "1" ] || fail "malformed telemetry (${name}) exited ${RC}, expected 1"
+done
+# The injected case must not have executed anything: the tree is still intact.
+[ -f "${ROOT}/selftest-malformed-injectschema/mod/module.prop" ] ||
+	fail "a shell metacharacter in the telemetry file caused execution"
+green "  malformed telemetry: FAIL, exit 1, and no injected command ran"
+
+# ── F. Missing SynthesisCore — critical ──────────────────────────────────────
+T="$(st_tree noapk)"
+st_stub "${T}" arm64-v8a 0
+rm -f "${T}/mod/synthesiscore.apk"
+RC="$(st_run "${T}")"
+grep -q "^\[FAIL\] SynthesisCore payload missing" "${T}/out.log" ||
+	fail "a missing SynthesisCore payload was not reported"
+[ "${RC}" = "1" ] || fail "missing SynthesisCore exited ${RC}, expected 1"
+# A truncated/placeholder APK is a different failure from an absent one, and is caught too.
+T="$(st_tree badapk)"
+st_stub "${T}" arm64-v8a 0
+printf 'not-a-zip' >"${T}/mod/synthesiscore.apk"
+RC="$(st_run "${T}")"
+grep -q "^\[FAIL\] SynthesisCore payload is not an APK" "${T}/out.log" ||
+	fail "a non-APK SynthesisCore payload was not reported"
+green "  missing / non-APK SynthesisCore: FAIL, exit 1"
+
+# ── G. Missing WebUI — critical ──────────────────────────────────────────────
+T="$(st_tree nowebui)"
+st_stub "${T}" arm64-v8a 0
+rm -f "${T}/mod/webroot/index.html"
+RC="$(st_run "${T}")"
+grep -q "^\[FAIL\] WebUI entry point missing" "${T}/out.log" ||
+	fail "a missing WebUI entry point was not reported"
+[ "${RC}" = "1" ] || fail "missing WebUI exited ${RC}, expected 1"
+# An unresolvable branding path is caught separately from a missing entry point.
+T="$(st_tree noasset)"
+st_stub "${T}" arm64-v8a 0
+rm -f "${T}/mod/banner.webp"
+RC="$(st_run "${T}")"
+grep -q "^\[FAIL\] Asset references unresolved" "${T}/out.log" ||
+	fail "an unresolvable module.prop asset reference was not reported"
+green "  missing WebUI / unresolved asset: FAIL, exit 1"
+
+# ── H. PhysicalDeviceRequired is a WARN, never a FAIL ────────────────────────
+# The rule the whole capability model rests on: withheld vendor tuning is a deliberate safety
+# decision, not a fault, and must never be presented to a user as a broken install.
+T="$(st_tree gated)"
+st_stub "${T}" arm64-v8a 0
+st_run "${T}" >/dev/null
+grep -q "^\[WARN\] Vendor capabilities require device validation" "${T}/out.log" ||
+	fail "vendor capability gating was not reported as a WARN"
+grep -qi "^\[FAIL\].*vendor" "${T}/out.log" &&
+	fail "vendor capability gating produced a FAIL; it must be a WARN"
+grep -q "gated tuning performs no writes" "${T}/out.log" ||
+	fail "the self-test does not state that gated capabilities perform no writes"
+# An unidentified SoC is the generic case, and is also a WARN rather than a failure.
+T="$(st_tree genericsoc)"
+st_stub "${T}" arm64-v8a 0
+printf 'unknown\n' >"${T}/cfg/soc_recognition"
+st_run "${T}" >/dev/null
+grep -q "^\[WARN\] SoC family not identified" "${T}/out.log" ||
+	fail "an unidentified SoC family was not reported as a WARN"
+grep -q "^\[PASS\] Generic capabilities available" "${T}/out.log" ||
+	fail "generic capability availability was not reported"
+green "  PhysicalDeviceRequired and generic SoC: WARN, never FAIL"
+
+# ── I. Rollback-failed state — critical when the runtime exports it ──────────
+# This runtime publishes only current_profile, so the honest default is "not exported" rather than
+# a PASS asserting a rollback succeeded on no evidence. When a future runtime does publish it, a
+# failed rollback must be critical.
+T="$(st_tree nostatus)"
+st_stub "${T}" arm64-v8a 0
+st_run "${T}" >/dev/null
+grep -q "^\[WARN\] Degraded/rollback state not exported" "${T}/out.log" ||
+	fail "the unexported-state case does not say so plainly"
+grep -q "^\[PASS\] Runtime health nominal" "${T}/out.log" &&
+	fail "runtime health was reported nominal without any evidence for it"
+
+T="$(st_tree rollbackfail)"
+st_stub "${T}" arm64-v8a 0
+printf 'rollback_failed=true\ndegraded=true\n' >"${T}/cfg/runtime_status.json"
+RC="$(st_run "${T}")"
+grep -q "^\[FAIL\] Rollback failed" "${T}/out.log" ||
+	fail "an exported rollback-failed state was not reported as critical"
+[ "${RC}" = "1" ] || fail "rollback-failed exited ${RC}, expected 1"
+
+T="$(st_tree mutation)"
+st_stub "${T}" arm64-v8a 0
+printf 'external_mutation=true\ncapability_limited=true\n' >"${T}/cfg/runtime_status.json"
+RC="$(st_run "${T}")"
+grep -q "^\[WARN\] External mutation detected" "${T}/out.log" ||
+	fail "an exported external-mutation state was not surfaced"
+grep -q "^\[WARN\] Capability-limited" "${T}/out.log" ||
+	fail "an exported capability-limited state was not surfaced"
+[ "${RC}" = "2" ] || fail "external mutation exited ${RC}, expected 2"
+green "  rollback-failed FAIL; mutation and capability-limited WARN; unexported stated honestly"
+
+# ── J. Legacy profiler unexpectedly present — critical ───────────────────────
+for legacy in flux_profiler flux_profiler.sh; do
+	T="$(st_tree "legacy-${legacy}")"
+	st_stub "${T}" arm64-v8a 0
+	printf '#!/system/bin/sh\n' >"${T}/mod/system/bin/${legacy}"
+	RC="$(st_run "${T}")"
+	grep -q "^\[FAIL\] Legacy profiler payload present" "${T}/out.log" ||
+		fail "a reappeared ${legacy} was not reported"
+	[ "${RC}" = "1" ] || fail "legacy profiler (${legacy}) exited ${RC}, expected 1"
+done
+green "  legacy profiler present: FAIL, exit 1"
+
+# ── K. Unsupported ABI — critical ────────────────────────────────────────────
+# A 32-bit fluxd on an arm64 device fails to exec at boot with nothing in the log to explain it.
+T="$(st_tree badabi)"
+st_stub "${T}" arm64-v8a 0
+printf '\177ELF\001\001\001\000\000\000\000\000\000\000\000\000\002\000\050\000' \
+	>"${T}/mod/system/bin/fluxd"
+chmod +x "${T}/mod/system/bin/fluxd"
+RC="$(st_run "${T}")"
+grep -q "^\[FAIL\] Runtime ABI mismatch" "${T}/out.log" ||
+	fail "an armeabi-v7a binary on an arm64 device was not reported"
+[ "${RC}" = "1" ] || fail "ABI mismatch exited ${RC}, expected 1"
+# The matching 32-bit case must still pass, or the check is just rejecting 32-bit devices.
+T="$(st_tree abi32)"
+st_stub "${T}" armeabi-v7a 0
+printf '\177ELF\001\001\001\000\000\000\000\000\000\000\000\000\002\000\050\000' \
+	>"${T}/mod/system/bin/fluxd"
+chmod +x "${T}/mod/system/bin/fluxd"
+st_run "${T}" >/dev/null
+grep -q "^\[PASS\] Flux runtime binary (armeabi-v7a)" "${T}/out.log" ||
+	fail "a correct armeabi-v7a install was not accepted"
+# A non-executable or empty binary is a distinct, also-critical failure.
+T="$(st_tree noexec)"
+st_stub "${T}" arm64-v8a 0
+chmod 644 "${T}/mod/system/bin/fluxd"
+RC="$(st_run "${T}")"
+grep -q "^\[FAIL\] Flux runtime binary is not executable" "${T}/out.log" ||
+	fail "a non-executable fluxd was not reported"
+[ "${RC}" = "1" ] || fail "non-executable fluxd exited ${RC}, expected 1"
+green "  ABI mismatch / non-executable runtime: FAIL; matching 32-bit install: PASS"
+
+# ── L. Command injection ─────────────────────────────────────────────────────
+# Every value the self-test reads comes off the filesystem, and a hostile or corrupted file must
+# be data, never code. A canary file proves it: if any injected payload ran, the canary appears.
+CANARY="${ROOT}/selftest-canary"
+rm -f "${CANARY}"
+T="$(st_tree injection)"
+st_stub "${T}" arm64-v8a 0
+printf 'id=flux; touch %s\nname=Flux\nversionCode=999\n' "${CANARY}" >"${T}/mod/module.prop"
+st_run "${T}" >/dev/null
+[ -e "${CANARY}" ] && fail "a command injected through module.prop EXECUTED"
+
+# shellcheck disable=SC2016  # single quotes are the point: these must stay UNEXPANDED payloads
+for payload in '$(touch CANARY)' '`touch CANARY`' '; touch CANARY' '&& touch CANARY' '| touch CANARY'; do
+	T="$(st_tree "inject-$(printf '%s' "${payload}" | tr -cd 'a-zA-Z')")"
+	st_stub "${T}" arm64-v8a 0
+	printf '%s\n' "$(printf '%s' "${payload}" | sed "s|CANARY|${CANARY}|")" \
+		>"${T}/cfg/soc_recognition"
+	printf 'schema_version=%s\n' "$(printf '%s' "${payload}" | sed "s|CANARY|${CANARY}|")" \
+		>"${T}/cfg/synthesis_core.json"
+	printf '%s\n' "$(printf '%s' "${payload}" | sed "s|CANARY|${CANARY}|")" \
+		>"${T}/cfg/current_profile"
+	st_run "${T}" >/dev/null
+	[ -e "${CANARY}" ] && fail "payload executed via a config file: ${payload}"
+done
+# A filename-shaped payload in a module.prop asset value must not escape the path test either.
+T="$(st_tree injectasset)"
+st_stub "${T}" arm64-v8a 0
+sed -i "s|^banner=.*|banner=../../../$(basename "${CANARY}")|" "${T}/mod/module.prop"
+st_run "${T}" >/dev/null
+[ -e "${CANARY}" ] && fail "an asset path payload executed"
+grep -q "^\[FAIL\] Asset references unresolved" "${T}/out.log" ||
+	fail "a traversing asset path was not reported as unresolved"
+[ -e "${CANARY}" ] || green "  command injection: every payload treated as data, nothing executed"
+
+# ── M. Android ash compatibility ─────────────────────────────────────────────
+# Android's /system/bin/sh is mksh or toybox ash. dash is the closest stand-in available here.
+# busybox ash is not installed on this host, which is a stated gap rather than a claim.
+if command -v dash >/dev/null 2>&1; then
+	T="$(st_tree ash)"
+	st_stub "${T}" arm64-v8a 0
+	(
+		# Same scoping rationale as st_run above.
+		# shellcheck disable=SC2030,SC2031
+		export FLUX_MODULE_DIR="${T}/mod" FLUX_CONFIG_DIR="${T}/cfg"
+		# shellcheck disable=SC2030,SC2031
+		export PATH="${T}/bin:${PATH}"
+		dash "${T}/mod/action.sh"
+	) >"${T}/dash.log" 2>&1
+	DASH_RC=$?
+	[ "${DASH_RC}" = "2" ] ||
+		fail "under dash the self-test exited ${DASH_RC}, expected 2"
+	# Same bytes under dash as under sh: a bashism would show up as a diff or a syntax error.
+	st_run "${T}" >/dev/null
+	# The telemetry age advances between the two runs, so it is normalised out. Everything else
+	# must match byte for byte — a bashism shows up as a diff or a syntax error, not as a clock.
+	sed -E 's/\([0-9]+s old\)/(Ns old)/' "${T}/dash.log" >"${T}/dash.norm"
+	sed -E 's/\([0-9]+s old\)/(Ns old)/' "${T}/out.log" >"${T}/sh.norm"
+	if diff -q "${T}/dash.norm" "${T}/sh.norm" >/dev/null 2>&1; then
+		green "  identical output under dash and sh (no bashisms)"
+	else
+		fail "the self-test behaves differently under dash:"
+		diff "${T}/dash.norm" "${T}/sh.norm" | head -10 >&2
+	fi
+	grep -qiE "not found|syntax error|bad substitution|unexpected" "${T}/dash.log" &&
+		fail "dash reported a shell error running the self-test"
+fi
+
+# No bash-only syntax in the source either, independent of what the fixtures happen to exercise.
+# Comments stripped first, and `[[` anchored as a command: [[:space:]] and [[:digit:]] are POSIX
+# character classes that legitimately contain "[[", so an unanchored match flags correct code.
+if printf '%s\n' "$(sed -E 's/#.*$//' module/action.sh)" |
+	grep -nE '(^|[[:space:]]|;)\[\[[[:space:]]|^[[:space:]]*local[[:space:]]|<<<|declare |=\(' \
+		>"${ROOT}/bashisms.txt" 2>/dev/null; then
+	fail "action.sh contains bash-only syntax:"
+	sed 's/^/    /' "${ROOT}/bashisms.txt" | head -10 >&2
+else
+	green "  no bash-only syntax, no 'local', no [[ ]], no herestrings"
+fi
+
+# ── N. No eval, no arbitrary command, no network ─────────────────────────────
+# Comments are stripped first: the file's own header describes each hazard by name, and a check
+# that fires on its own documentation trains people to ignore it.
 ACTION_CODE="$(sed -E 's/#.*$//' module/action.sh)"
-if grep -qE '\beval\b' <<<"${ACTION_CODE}"; then
+printf '%s\n' "${ACTION_CODE}" | grep -qE '(^[[:space:]]*|[;|&][[:space:]]*)eval[[:space:]]' &&
 	fail "action.sh uses eval"
-fi
-# Every URL in the script must be a literal https:// constant or a reference to the config file's
-# variables. A URL assembled from anything else is the thing this check exists to prevent.
-# shellcheck disable=SC2016  # the literal '$' is the pattern: we are matching shell source text
-BAD_URLS="$(grep -oE '(-d|open_url) +"?\$[A-Za-z_]+' <<<"${ACTION_CODE}" |
-	grep -vE 'OFFICIAL_DONATION_URL|FLUX_REPO_URL|\$1' || true)"
-if [ -n "${BAD_URLS}" ]; then
-	fail "action.sh opens a URL from an unexpected variable: ${BAD_URLS}"
-else
-	green "  no eval, and every destination is a project-controlled constant"
-fi
+# Word-anchored with \b: a plain substring match for "nc" also hits "since" and "instance", and
+# a negated bracket class does not behave portably across the greps this runs under.
+for forbidden in curl wget nc ping 'am start' 'pm install' 'settings put'; do
+	printf '%s\n' "${ACTION_CODE}" | grep -qE "\\b${forbidden}\\b" &&
+		fail "action.sh performs a forbidden operation: ${forbidden}"
+done
+# Redirections that would write. The self-test may only read; `>` or `>>` onto a device path is
+# the shape a write would take.
+printf '%s\n' "${ACTION_CODE}" | grep -qE '>[[:space:]]*"?\$\{?(FLUX_MODULE_DIR|FLUX_CONFIG_DIR)' &&
+	fail "action.sh redirects output into the module or config tree"
+green "  no eval, no network tool, no intent, no write redirection"
+
 
 # G. The committed configuration is coherent, in whichever state it is left.
 COMMITTED_DONATE="$(sed -n 's/^OFFICIAL_DONATION_URL=//p' module/installer/config.sh | tr -d '"'"'"'"')"

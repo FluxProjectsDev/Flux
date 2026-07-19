@@ -12,8 +12,8 @@ actually supports.
 | Architecture | arm64-v8a, armeabi-v7a | same | same |
 | Module mount | used | skipped (`skip_mount`) | skipped (`skip_mount`) |
 | `fluxd` on `$PATH` | via the mount | symlinked into `/data/adb/ksu/bin` | symlinked into `/data/adb/ap/bin` |
-| WebUI button | none — use Action | native | native |
-| Action button | none | yes | yes |
+| WebUI button | none | native | native |
+| Action button | v27+ only | yes | yes |
 
 An unrecognised manager installs too, provided it implements the standard module
 contract (`MODPATH`, `ZIPFILE`, `TMPDIR`, `ARCH`, `API`, `ui_print`,
@@ -185,27 +185,104 @@ and uninstall has to clean up what previous versions left behind.
 Other modules and unrelated user data are untouched, and a partial or legacy
 installation is tolerated.
 
-## Support and donations
+## Module card buttons
+
+| Button | Does |
+|---|---|
+| left Action | runs the Flux Self-Test |
+| WebUI | opens the Flux WebUI |
+| `$` | opens the official SociaBuzz donation page |
+| delete | uninstalls the module |
+
+The `$` button is driven by the `donate` key in `module.prop`, which the build
+writes from `OFFICIAL_DONATION_URL`. The manager opens it; no Flux script is
+involved, which is why Action no longer carries it — the donation page already had
+its own button, and spending Action on a duplicate wasted the one control that had
+no other home.
+
+**Magisk renders almost none of this.** It ignores `banner`, `webuiIcon`,
+`actionIcon` and `donate`, has no WebUI button, and only gained module Action
+support in v27 — while Flux installs on v20.4+. So on Magisk the card offers the
+self-test on v27+, and nothing at all below that.
+
+Magisk users reach the WebUI through a standalone viewer (WebUI X or
+KSUWebUIStandalone), not from the module card. Action previously tried to open the
+WebUI for them; that path is gone. On v27+ it is a real trade — the WebUI shortcut
+was replaced by the self-test. Below v27 nothing changed, because an Action button
+that does not exist could never have invoked it.
+
+## The Action button: Flux Self-Test
+
+Tapping Action runs a bounded, read-only self-test and prints the result into the
+manager's log window. It is the answer to "is Flux actually working?", which
+nothing else on the card could tell you.
+
+```
+Flux Self-Test
+----------------------------
+
+[PASS] Module metadata
+[PASS] Flux runtime binary (arm64-v8a)
+[PASS] Flux daemon active
+[PASS] SynthesisCore telemetry (2s old)
+[PASS] Telemetry schema v2
+[WARN] Vendor capabilities require device validation
+[PASS] WebUI assets
+[PASS] Rollback support
+[PASS] Legacy profiler absent
+
+Result: PASS WITH LIMITATIONS
+```
+
+Seven groups are checked: module installation, Flux runtime, SynthesisCore
+telemetry, runtime health, device capability, WebUI and package assets, and safety.
+
+| Result | Meaning | Exit |
+|---|---|---|
+| `PASS` | every critical check passed, nothing gated | 0 |
+| `PASS WITH LIMITATIONS` | critical checks passed; optional or gated items unavailable | 2 |
+| `FAIL` | at least one critical component failed | 1 |
+
+`PASS WITH LIMITATIONS` is the expected result on every device today, because
+vendor capabilities are gated behind physical-device validation and that gate is
+reported as a `WARN`. A gated capability is **not** a failure: the execution engine
+plans nothing for a capability it has not validated, so a gated device performs
+zero vendor writes by construction.
+
+### What it does not do
+
+The self-test only reads. It writes nothing, applies no profile, touches no sysfs
+node, calls no execution-engine apply, alters no `RuntimeProfileState`, starts and
+restarts no service, opens no URL, and sends nothing off the device. CI asserts
+this rather than trusting it: a fixture takes a content-and-mode manifest of the
+module and config trees before and after a run and requires them identical, and a
+stubbed Activity Manager must record no intent.
+
+Every value it reads comes off the filesystem and is treated as data, never as
+code. There is no `eval`, no constructed command, and no network tool in the
+script. Injection fixtures feed `$(...)`, backticks, `;`, `&&` and `|` payloads
+through `module.prop`, `soc_recognition`, `current_profile` and the telemetry
+snapshot, and assert that a canary file never appears.
+
+### Honest gaps
+
+Degraded, rollback-failed, external-mutation and capability-limited states are
+reported as **not exported** rather than as passing. This runtime publishes only
+`current_profile` (see `docs/status-contract.md`), so there is no evidence on disk
+for those states — and a `PASS` there would assert that rollback succeeded and
+nothing was mutated externally on no evidence at all. If a future runtime writes
+the `runtime_status.json` that the status contract names as the seam, the self-test
+already reads it: a failed rollback is critical, mutation and capability-limited
+are warnings.
+
+## Donations
 
 The official destination is <https://sociabuzz.com/fbrichy>.
 
-| Manager | WebUI | Action button | `donate` metadata | Reaches Support via |
-|---|---|---|---|---|
-| Magisk | via Action | opens the WebUI | not read | the WebUI's Support entry |
-| KernelSU | native | opens Support | read by MMRL-family UIs | Action, or the WebUI |
-| APatch | native | opens Support | read by MMRL-family UIs | Action, or the WebUI |
-| MMRL | native card | defers to the card | read | the card, or the WebUI |
-
-The Action button is spent on whatever the manager cannot already do. KernelSU and
-APatch already have a WebUI button, so their Action goes to Support. Magisk has no
-WebUI button, so its Action opens the WebUI — which means Magisk has no *dedicated*
-Support button, but Magisk users still reach Support through the WebUI's own entry.
-
 `OFFICIAL_DONATION_URL` in `module/installer/config.sh` is the single definition.
-Setting it enables all three paths at once — the `donate`/`donateIcon` keys in
-`module.prop`, the Action button on KernelSU and APatch, and the WebUI entry.
-Clearing it back to `""` disables all three, and no donation button is claimed
-anywhere.
+Setting it writes the `donate`/`donateIcon` keys into `module.prop` and points the
+WebUI's support entry at the same address; clearing it back to `""` removes both,
+and no donation button is claimed anywhere.
 
 Because a WebUI page cannot source a shell file, `webui/src/views/Home.vue`
 restates the same URL, and CI asserts the two agree so they cannot drift into
@@ -213,4 +290,5 @@ sending users to different addresses.
 
 Every URL Flux can open is a compile-time constant. Nothing is read from input,
 from a file on the device, from a property, or from the network, and no donation
-page is ever opened during installation or boot — only a deliberate tap.
+page is ever opened during installation, boot, or by the self-test — only a
+deliberate tap on the manager's own `$` button.
