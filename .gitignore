@@ -15,3 +15,9 @@ jni/tests/build/
 # scripts/verify-branding.py deliberately validates the committed conversion instead of these,
 # because CI has no access to them.
 .user-assets/
+
+# Python bytecode. Three .pyc files were committed by accident, including stale bytecode for a
+# generator this branch deleted — they are build output of scripts/, never inputs, and nothing
+# reads them.
+__pycache__/
+*.pyc
