@@ -38,17 +38,21 @@ FLUX_ISSUES_URL="https://github.com/FluxProjectsDev/Flux/issues"
 # address sends a user's money, or their trust, somewhere the project does not control, and the
 # user has no way to tell a mistake from an endorsement.
 #
-# Rejected as a source, and worth recording so nobody reaches for it again: the
-# `https://t.me/c/3901105851/3` link that webui/src/views/Home.vue used to carry. A
-# t.me/c/<internal-id>/ link addresses a *private* channel by its internal id — it resolves only
-# for accounts already in that channel and fails for everyone else, so it could never have served
-# as a public donation destination.
+# Rejected as a source, and worth recording so nobody reaches for it again: the private Telegram
+# channel link that webui/src/views/Home.vue used to carry. Telegram's private-channel form
+# addresses a channel by its internal numeric id, so it resolves only for accounts already in that
+# channel and fails for everyone else — it could never have served as a public donation
+# destination. The literal URL is deliberately not repeated here: this file ships inside the
+# module, and verify-package.sh scans the package for that link shape, so quoting it in a comment
+# would trip the check that exists to keep it out.
 #
 # Setting this enables every donate path at once, and nothing else needs to change:
 #   - compile_zip.sh appends `donate=` and `donateIcon=` to module.prop
 #   - the manager's own `$` button opens it from module.prop's donate key; no Flux script is
 #     involved, and action.sh deliberately does not open it (Action runs the self-test)
-#   - the WebUI's support entry points here
+#   - the WebUI's Donate entry in Home.vue points here. Settings' Support entry deliberately does
+#     not: Support is a help destination (the public issue tracker) and Donate asks for money,
+#     and routing one to the other misdirects whichever user guessed wrong
 #
 # Clearing it back to "" disables all three again, and the fixtures cover both states.
 #

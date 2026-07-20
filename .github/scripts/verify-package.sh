@@ -473,9 +473,12 @@ fi
 # A t.me/c/<internal-id>/ URL addresses a Telegram channel by internal id: it resolves only for
 # accounts already in that channel and silently fails for everyone else. Shipping one as a
 # user-facing destination means the button is broken for essentially every user who taps it.
-# Both Home.vue and Settings.vue carried the same private link, and fixing only the first left
-# the second live, so this asserts against the built bundle rather than the Vue sources — minified
-# output has no comments, so a link that survives here is a link that actually ships.
+# Both Home.vue and Settings.vue carried the same private link, and fixing only the first left the
+# second live, so the scan is deliberately blunt: every packaged file, no exemption for comments.
+# Exempting them would need this check to parse the comment syntax of everything that ships, and a
+# link that is only "documentation" today is one copy-paste away from being a destination again.
+# The cost is that packaged files may not quote the link even to explain it — module/installer/
+# config.sh documents the rejected donation source in prose for exactly that reason.
 if grep -rqF 't.me/c/' "${WORK}/pkg" 2>/dev/null; then
 	fail "the package ships a private-channel t.me/c/ link:"
 	grep -rlF 't.me/c/' "${WORK}/pkg" 2>/dev/null | sed "s#^${WORK}/pkg/#    #" >&2
