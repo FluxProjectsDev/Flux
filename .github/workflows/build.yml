@@ -82,6 +82,21 @@ jobs:
           name: flux-build
           path: ${{ steps.compileZip.outputs.zipName }}
 
+      # Private debug-symbol bundle for crash symbolization. ndk-build strips the shipped
+      # binary (libs/<abi>/fluxd) but keeps the unstripped link output at
+      # obj/local/<abi>/fluxd, which carries the .symtab and the GNU build-id that matches
+      # the shipped binary. It is uploaded SEPARATELY from the flashable zip and is NEVER a
+      # release asset: it stays a short-retention CI artifact maintainers pull to resolve a
+      # crash address, so the symbols that were stripped off the release stay off the release
+      # while remaining recoverable. See docs/security/release-verification.md.
+      - name: Upload private debug symbols
+        uses: actions/upload-artifact@v6
+        with:
+          name: flux-debug-symbols-${{ github.run_id }}
+          path: obj/local/*/fluxd
+          retention-days: 14
+          if-no-files-found: error
+
       - name: Publish GitHub Release
         # Only on manual dispatch: pull_request and push builds have no release tag and must
         # not create releases. The default GITHUB_TOKEN is enough; no PAT.

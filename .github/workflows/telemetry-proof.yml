@@ -117,6 +117,13 @@ jobs:
       - name: Prove V2 live execution and legacy deactivation (armeabi-v7a)
         run: bash .github/scripts/verify-live-execution.sh armeabi-v7a
 
+      # Release hardening of the shipped binary: minimal exported surface (the export map
+      # took effect), exploit mitigations (non-exec stack, RELRO, BIND_NOW, PIE), no
+      # developer paths, and the required entry point still present. Runs on the same
+      # build output as the link proof above.
+      - name: Prove native release hardening (both ABIs)
+        run: bash .github/scripts/verify-native-hardening.sh
+
       # Build the WebUI so the package under validation is the package that ships, not a
       # stripped-down approximation of it.
       - name: Build WebUI
@@ -177,5 +184,6 @@ jobs:
             obj/local/*/fluxd
             libs/*/fluxd
             package-inventory.tsv
+            native-hardening-*.exports
           retention-days: 7
           if-no-files-found: warn
