@@ -169,11 +169,13 @@ def check_prop_references():
     copies them there from module/assets/. So this maps each key back to its source.
     """
     prop = os.path.join(REPO_ROOT, "module", "module.prop")
+    # actionIcon and webuiIcon are deliberately absent from module.prop: no official Flux emblem
+    # exists, so each manager draws its own default rather than a stand-in this project would be
+    # asserting as its identity. They are not listed here either — a key that reappears without an
+    # approved asset behind it should fail as an unknown path, not resolve to something generated.
     sources = {
         "banner.webp": os.path.join("module", "assets", "branding", "banner.webp"),
-        "action.webp": os.path.join("module", "assets", "icons", "action.webp"),
         "donate.webp": os.path.join("module", "assets", "icons", "donate.webp"),
-        "webroot/icon.webp": os.path.join("webui", "public", "icon.webp"),
     }
     with open(prop, "r", encoding="utf-8") as fh:
         lines = fh.read().splitlines()

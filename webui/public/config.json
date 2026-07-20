@@ -1,6 +1,5 @@
 {
   "title": "Flux Tweaks",
-  "icon": "icon.webp",
   "exitConfirm": false,
   "backInterceptor": "javascript"
 }

@@ -18,12 +18,13 @@
 #
 # Emits, from one geometry description each:
 #
-#   module/assets/icons/action.webp + .svg   the module manager's Action button
 #   module/assets/icons/donate.webp + .svg   the Support/Donate destination
 #
-# There is deliberately no webui icon here. `webuiIcon` points at webroot/icon.webp, which the
-# WebUI build already produces from webui/public/icon.webp — the product icon has one source, and
-# copying it into module/assets/ would create a second one to forget to update.
+# There is deliberately no action or webui icon here. `actionIcon` and `webuiIcon` are not set in
+# module.prop at all: no official Flux emblem exists yet, and a manager given no icon key falls
+# back to its own default artwork, which is a truthful blank rather than a placeholder glyph
+# pretending to be the product's identity. Setting either key again means shipping a real approved
+# emblem, not regenerating something from this script.
 #
 # Same rules as scripts/render-banner.py, for the same reasons: geometry this repository owns
 # rather than a downloaded icon set, reproducible output, no font and no network. The glyphs are
@@ -61,16 +62,8 @@ def hexcolor(rgb):
 
 
 # ── Glyph geometry, in a 0..1 box that is then inset into the tile ───────────
-# Action: a bolt. Flux's own energy motif, and the same idea the WebUI's BoltCharge icon carries,
-# redrawn here as a closed polygon we own rather than lifted from an icon font.
-BOLT = [
-    (0.52, 0.00), (0.14, 0.56), (0.40, 0.56), (0.34, 1.00),
-    (0.76, 0.42), (0.49, 0.42), (0.62, 0.00),
-]
-
-
 def heart_polygon(samples=180):
-    """The standard parametric heart, sampled. Normalised into the same 0..1 box as BOLT."""
+    """The standard parametric heart, sampled, normalised into the 0..1 glyph box."""
     pts = []
     for i in range(samples):
         t = 2.0 * math.pi * i / samples
@@ -90,10 +83,6 @@ def heart_polygon(samples=180):
 
 
 ICONS = {
-    # `inset` is tuned per glyph rather than shared: the bolt is a tall narrow shape and the
-    # heart a full square one, so an identical inset makes the bolt read as the smaller icon.
-    # These values equalise their apparent weight, not their bounding boxes.
-    "action": {"points": BOLT, "color": PRIMARY, "inset": 0.20, "aspect": 0.68},
     "donate": {"points": heart_polygon(), "color": TERTIARY, "inset": 0.27, "aspect": 1.0},
 }
 

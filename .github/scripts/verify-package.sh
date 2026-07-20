@@ -422,15 +422,51 @@ head2 "11. Branding and module.prop asset references"
 # A metadata key pointing at a file that is not in the package makes a manager render a broken
 # card. Checked against the package, because the source tree having the asset says nothing about
 # whether packaging copied it.
+#
+# The shortcut icons are optional. `actionIcon` and `webuiIcon` are currently unset, because no
+# official Flux emblem exists and a manager given no key draws its own default — that is a
+# supported state, not a defect, so their absence is reported rather than failed. What is not
+# optional is a key that names a file: declaring an icon and shipping a broken one is worse than
+# declaring none, since the manager has no default to fall back to once the key exists.
+#
+# "Resolves" therefore means decodes, not merely exists. A truncated or mis-copied WebP is a
+# non-empty file that every size check passes and no manager can draw.
 if [ -f "${PROP:-/nonexistent}" ]; then
 	ASSETS_OK=1
 	for key in banner webuiIcon actionIcon donateIcon; do
 		value="$(sed -n "s/^${key}=//p" "${PROP}" | head -1)"
-		[ -n "${value}" ] || continue
-		if [ -s "${WORK}/pkg/${value}" ]; then
-			green "  ${key}=${value} resolves ($(du -h "${WORK}/pkg/${value}" | cut -f1))"
-		else
+		if [ -z "${value}" ]; then
+			case "${key}" in
+			actionIcon | webuiIcon)
+				info "  ${key} is unset; the manager uses its own default icon"
+				;;
+			donateIcon)
+				# Paired with `donate` and checked as a pair below: unset is correct when no
+				# donation destination is configured, and half-set is what actually matters.
+				;;
+			*)
+				fail "module.prop has no ${key}"
+				ASSETS_OK=0
+				;;
+			esac
+			continue
+		fi
+		if [ ! -s "${WORK}/pkg/${value}" ]; then
 			fail "module.prop ${key}=${value} points at a file that is not in the package"
+			ASSETS_OK=0
+			continue
+		fi
+		if DECODED="$(python3 -c '
+import sys
+from PIL import Image
+with Image.open(sys.argv[1]) as im:
+    im.load()
+    print("%s %dx%d %s" % (im.format, im.width, im.height, im.mode))
+' "${WORK}/pkg/${value}" 2>&1)"; then
+			green "  ${key}=${value} resolves and decodes (${DECODED})"
+		else
+			fail "module.prop ${key}=${value} is in the package but does not decode:"
+			fail "    ${DECODED}"
 			ASSETS_OK=0
 		fi
 	done
