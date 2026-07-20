@@ -74,5 +74,16 @@ jobs:
         with:
           scandir: './.github/scripts'
 
+      # The module's own shell now runs on every device that installs Flux, as root, and it was
+      # not covered by either scandir above. Every file carries a `#!/system/bin/sh` shebang, so
+      # ShellCheck holds them to POSIX sh without needing a flag here — which matters because
+      # Magisk installs run under busybox ash, where `local`, `==` and `$(<file)` are undefined.
+      # `$(<file)` had in fact been silently expanding to nothing in the SoC detection chain.
+      - name: ShellCheck the module scripts
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: './module'
+          severity: warning
+
       - name: actionlint
         uses: raven-actions/actionlint@v2

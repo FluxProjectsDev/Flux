@@ -74,9 +74,15 @@ classify_owner() {
 	module.prop | customize.sh | service.sh | uninstall.sh | action.sh | cleanup.sh | verify.sh)
 		printf 'module lifecycle'
 		;;
+	installer/*) printf 'installer (verified, sourced at install time)' ;;
 	gamelist.txt | device_mitigation.json | config/*) printf 'configuration data' ;;
 	LICENSE | NOTICE.md) printf 'licensing' ;;
-	banner.webp) printf 'branding' ;;
+	banner.webp | action.webp | donate.webp) printf 'branding' ;;
+	# The digest sidecars compile_zip.sh writes next to every packaged file, and the Magisk
+	# installer stub. Both were previously "unclassified", which left ~1/3 of the inventory
+	# looking like nobody had decided to ship it — the exact signal this column exists to give.
+	*.sha256) printf 'integrity metadata' ;;
+	META-INF/*) printf 'installer stub (Magisk update-binary)' ;;
 	*) printf 'unclassified' ;;
 	esac
 }
@@ -85,6 +91,11 @@ classify_requirement() {
 	case "$1" in
 	libs/*/fluxd | module.prop | customize.sh | uninstall.sh | service.sh) printf 'required' ;;
 	system/bin/flux_utility | synthesiscore.apk | webroot/index.html) printf 'required' ;;
+	# verify.sh is the installer trust root and every installer/ component is sourced as root at
+	# install time. None of them is optional: a missing one aborts the install by design.
+	verify.sh | action.sh | cleanup.sh) printf 'required' ;;
+	installer/*.sh) printf 'required' ;;
+	META-INF/com/google/android/update-binary) printf 'required (Magisk)' ;;
 	LICENSE | NOTICE.md) printf 'required (licensing)' ;;
 	*) printf 'optional' ;;
 	esac
@@ -129,7 +140,7 @@ else
 
 	# The template ships these blank and compile_zip.sh fills them in. A blank value here means
 	# the sed silently did not match — the module would install with no version at all.
-	for key in id name version versionCode author description; do
+	for key in id name version versionCode author description support; do
 		if [ -z "$(prop_value "${key}")" ]; then
 			fail "module.prop: '${key}' is empty in the *generated* file — the template ships it "
 			fail "  blank and the build fills it in, so empty means the substitution missed"
@@ -204,6 +215,37 @@ else
 	else
 		info "updateJson is empty (no release channel configured for this build)"
 	fi
+
+	# Asset metadata must resolve inside the package. A key naming a file that is not shipped
+	# renders as a broken card, and it is invisible from the source tree — the source having the
+	# asset says nothing about whether the packaging step copied it.
+	for key in banner webuiIcon actionIcon donateIcon; do
+		asset="$(prop_value "${key}")"
+		[ -n "${asset}" ] || continue
+		if [ -s "${WORK}/pkg/${asset}" ]; then
+			green "  ${key} -> ${asset} (present)"
+		else
+			fail "module.prop: ${key}=${asset} is not in the package"
+		fi
+	done
+
+	# donate and donateIcon are appended together by compile_zip.sh, or neither is. Half of the
+	# pair means the packaging step ran partway: an icon with no destination, or a destination
+	# with no affordance to reach it.
+	DONATE="$(prop_value donate)"
+	DONATE_ICON="$(prop_value donateIcon)"
+	if [ -n "${DONATE}" ]; then
+		case "${DONATE}" in
+		https://*) green "  donate: ${DONATE}" ;;
+		*) fail "module.prop: donate must be https://, got '${DONATE}'" ;;
+		esac
+		[ -n "${DONATE_ICON}" ] || fail "module.prop: donate is set but donateIcon is not"
+	elif [ -n "${DONATE_ICON}" ]; then
+		fail "module.prop: donateIcon is set but donate is not"
+	else
+		info "no donate metadata; OFFICIAL_DONATION_URL is unconfigured and nothing is claimed"
+	fi
+
 	green "  module.prop contract validated against the generated file"
 fi
 

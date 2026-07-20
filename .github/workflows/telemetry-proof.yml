@@ -80,6 +80,27 @@ jobs:
       - name: Prove the Category A / Category C boundary
         run: bash .github/scripts/verify-provenance-boundary.sh
 
+      # The banner and icons are generated, so the committed rasters must be the ones their
+      # generator produces — otherwise an edit to a generator ships a package whose artwork no
+      # longer matches its own source and nothing says so. Runs before the build, because like
+      # the provenance check above it needs no build to be true.
+      #
+      # Installed from apt rather than pip: Ubuntu images are PEP 668 externally-managed, so a
+      # bare `pip install` fails. fonts-dejavu-core is not incidental — the generator refuses to
+      # run without it rather than silently substituting whatever font it finds, which is what
+      # keeps the output byte-reproducible across machines.
+      - name: Install asset generator dependencies
+        run: sudo apt-get update && sudo apt-get install -y python3-pil fonts-dejavu-core
+
+      # The icons are generated, so they are proven against their generator. The banner is not:
+      # it is a conversion of a maintainer-approved artwork whose source is supplied out of band
+      # and stays untracked, so there is nothing here to regenerate it from. It is proven against
+      # its decoded pixel identity instead. See scripts/verify-branding.py.
+      - name: Prove branding assets
+        run: |
+          python3 scripts/verify-branding.py
+          python3 scripts/render-icons.py --check
+
       - name: Build Flux Daemon
         run: ndk-build -j"$(nproc --all)"
 
@@ -125,6 +146,14 @@ jobs:
       - name: Prove module lifecycle (install / upgrade / uninstall)
         id: lifecycle
         run: bash .github/scripts/verify-lifecycle.sh
+
+      # Executes the real customize.sh against a synthetic package under a fake manager
+      # environment. This is the only step that observes installer *behaviour* rather than its
+      # source: that a corrupted payload aborts before printing success, that APatch is not
+      # misreported as KernelSU, that a warning downgrades the summary rather than being lost.
+      - name: Prove installer behaviour (managers, upgrade, failure modes, action)
+        id: installer
+        run: bash .github/scripts/verify-installer.sh
 
       # The aggregate. It does not check that other jobs *exist* — it re-asserts, in one place,
       # the specific guarantees whose individual steps must all have run in *this* job to reach

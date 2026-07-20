@@ -1,3 +1,4 @@
+#!/system/bin/sh
 #
 # Copyright (C) 2024-2026 Rem01Gaming
 # Copyright (C) 2024-2026 FebriCahyaa
@@ -66,7 +67,7 @@ conservative
 powersave
 "
 
-if [ "$default_gov" == "performance" ]; then
+if [ "$default_gov" = "performance" ]; then
 	for gov in $default_gov_preferred_array; do
 		grep -q "$gov" "$CPUFREQ/scaling_available_governors" && {
 			echo "$gov" >$MODULE_CONFIG/default_cpu_gov
@@ -153,9 +154,10 @@ start_synthesiscore() {
 }
 
 synthesiscore_alive() {
-	local pid
-	pid=$(cat "$MODULE_CONFIG/sysmon.pid" 2>/dev/null)
-	[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+	# No `local`: it is a shell extension, not POSIX, and this script runs under whatever sh
+	# the manager provides. The name is prefixed instead so it cannot collide.
+	_sysmon_pid=$(cat "$MODULE_CONFIG/sysmon.pid" 2>/dev/null)
+	[ -n "$_sysmon_pid" ] && kill -0 "$_sysmon_pid" 2>/dev/null
 }
 
 start_synthesiscore
