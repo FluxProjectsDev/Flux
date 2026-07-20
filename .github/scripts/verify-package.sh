@@ -422,15 +422,51 @@ head2 "11. Branding and module.prop asset references"
 # A metadata key pointing at a file that is not in the package makes a manager render a broken
 # card. Checked against the package, because the source tree having the asset says nothing about
 # whether packaging copied it.
+#
+# The shortcut icons are optional. `actionIcon` and `webuiIcon` are currently unset, because no
+# official Flux emblem exists and a manager given no key draws its own default — that is a
+# supported state, not a defect, so their absence is reported rather than failed. What is not
+# optional is a key that names a file: declaring an icon and shipping a broken one is worse than
+# declaring none, since the manager has no default to fall back to once the key exists.
+#
+# "Resolves" therefore means decodes, not merely exists. A truncated or mis-copied WebP is a
+# non-empty file that every size check passes and no manager can draw.
 if [ -f "${PROP:-/nonexistent}" ]; then
 	ASSETS_OK=1
 	for key in banner webuiIcon actionIcon donateIcon; do
 		value="$(sed -n "s/^${key}=//p" "${PROP}" | head -1)"
-		[ -n "${value}" ] || continue
-		if [ -s "${WORK}/pkg/${value}" ]; then
-			green "  ${key}=${value} resolves ($(du -h "${WORK}/pkg/${value}" | cut -f1))"
-		else
+		if [ -z "${value}" ]; then
+			case "${key}" in
+			actionIcon | webuiIcon)
+				info "  ${key} is unset; the manager uses its own default icon"
+				;;
+			donateIcon)
+				# Paired with `donate` and checked as a pair below: unset is correct when no
+				# donation destination is configured, and half-set is what actually matters.
+				;;
+			*)
+				fail "module.prop has no ${key}"
+				ASSETS_OK=0
+				;;
+			esac
+			continue
+		fi
+		if [ ! -s "${WORK}/pkg/${value}" ]; then
 			fail "module.prop ${key}=${value} points at a file that is not in the package"
+			ASSETS_OK=0
+			continue
+		fi
+		if DECODED="$(python3 -c '
+import sys
+from PIL import Image
+with Image.open(sys.argv[1]) as im:
+    im.load()
+    print("%s %dx%d %s" % (im.format, im.width, im.height, im.mode))
+' "${WORK}/pkg/${value}" 2>&1)"; then
+			green "  ${key}=${value} resolves and decodes (${DECODED})"
+		else
+			fail "module.prop ${key}=${value} is in the package but does not decode:"
+			fail "    ${DECODED}"
 			ASSETS_OK=0
 		fi
 	done
@@ -461,6 +497,30 @@ if [ -f "${PROP:-/nonexistent}" ]; then
 	else
 		green "  support=${SUPPORT}"
 	fi
+
+	# Support and Donate are different promises: one is where a user goes when the module is
+	# broken, the other is where they go to give money. Collapsing them onto one address either
+	# asks for payment from someone reporting a bug or drops bug reports into a payment page.
+	if [ -n "${SUPPORT}" ] && [ -n "${DONATE_URL}" ] && [ "${SUPPORT}" = "${DONATE_URL}" ]; then
+		fail "support and donate are both '${SUPPORT}' — they must stay separate destinations"
+	fi
+fi
+
+# A t.me/c/<internal-id>/ URL addresses a Telegram channel by internal id: it resolves only for
+# accounts already in that channel and silently fails for everyone else. Shipping one as a
+# user-facing destination means the button is broken for essentially every user who taps it.
+# Both Home.vue and Settings.vue carried the same private link, and fixing only the first left the
+# second live, so the scan is deliberately blunt: every packaged file, no exemption for comments.
+# Exempting them would need this check to parse the comment syntax of everything that ships, and a
+# link that is only "documentation" today is one copy-paste away from being a destination again.
+# The cost is that packaged files may not quote the link even to explain it — module/installer/
+# config.sh documents the rejected donation source in prose for exactly that reason.
+if grep -rqF 't.me/c/' "${WORK}/pkg" 2>/dev/null; then
+	fail "the package ships a private-channel t.me/c/ link:"
+	grep -rlF 't.me/c/' "${WORK}/pkg" 2>/dev/null | sed "s#^${WORK}/pkg/#    #" >&2
+	fail "  a private-channel link is unreachable for normal users and must not ship"
+else
+	green "  no private-channel t.me/c/ link in the package"
 fi
 
 # The editable asset sources are build inputs, not module content. module/assets/ is excluded

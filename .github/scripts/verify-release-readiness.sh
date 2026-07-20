@@ -77,7 +77,7 @@ classify_owner() {
 	installer/*) printf 'installer (verified, sourced at install time)' ;;
 	gamelist.txt | device_mitigation.json | config/*) printf 'configuration data' ;;
 	LICENSE | NOTICE.md) printf 'licensing' ;;
-	banner.webp | action.webp | donate.webp) printf 'branding' ;;
+	banner.webp | donate.webp) printf 'branding' ;;
 	# The digest sidecars compile_zip.sh writes next to every packaged file, and the Magisk
 	# installer stub. Both were previously "unclassified", which left ~1/3 of the inventory
 	# looking like nobody had decided to ship it — the exact signal this column exists to give.

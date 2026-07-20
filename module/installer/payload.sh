@@ -34,7 +34,7 @@
 
 # Files installed to MODPATH from the package root, each verified against its packaged digest.
 FLUX_PAYLOAD_CRITICAL="module.prop service.sh uninstall.sh action.sh cleanup.sh synthesiscore.apk"
-FLUX_PAYLOAD_OPTIONAL="banner.webp action.webp donate.webp"
+FLUX_PAYLOAD_OPTIONAL="banner.webp donate.webp"
 
 flux_install_module_files() {
 	for _entry in ${FLUX_PAYLOAD_CRITICAL}; do
@@ -98,12 +98,9 @@ flux_install_webui() {
 	_count="$(find "${MODPATH}/webroot" -type f 2>/dev/null | wc -l)"
 	flux_step_ok "WebUI installed and verified (${_count})"
 
-	# webuiIcon in module.prop points here. Its absence costs only the card icon.
-	if [ -s "${MODPATH}/webroot/icon.webp" ]; then
-		flux_step_ok "WebUI icon present"
-	else
-		flux_step_warn "WebUI icon missing; the manager will show a default icon"
-	fi
+	# No WebUI icon is checked for: module.prop sets no `webuiIcon`, because no official Flux
+	# emblem exists and the manager's own default is the honest fallback. Warning about a missing
+	# icon here would report a deliberate choice as a defect on every single install.
 	return 0
 }
 

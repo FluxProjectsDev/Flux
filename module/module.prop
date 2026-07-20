@@ -7,5 +7,3 @@ description=Adaptive hardware-aware runtime optimization with verified execution
 updateJson=
 support=
 banner=banner.webp
-webuiIcon=webroot/icon.webp
-actionIcon=action.webp

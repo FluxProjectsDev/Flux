@@ -257,12 +257,12 @@
               <span class="text-xs font-semibold text-on-surface">GitHub</span>
             </RippleComponent>
             <RippleComponent
-              @click="openTelegram"
+              @click="openSupport"
               class="flex-1 flex items-center justify-center gap-2 bg-primary-container rounded-xl py-3 cursor-pointer"
               tabindex="0"
             >
-              <TelegramIcon :size="16" class="text-on-primary-container" />
-              <span class="text-xs font-semibold text-on-primary-container">Telegram</span>
+              <OpenInNewIcon :size="16" class="text-on-primary-container" />
+              <span class="text-xs font-semibold text-on-primary-container">Support</span>
             </RippleComponent>
           </div>
         </div>
@@ -336,7 +336,7 @@ import LoadingSpinner from '@/components/ui/LoadingSpinner.vue'
 import CheckCircle from '@/components/icons/CheckCircle.vue'
 import CodeIcon from '@/components/icons/Code.vue'
 import GithubIcon from '@/components/icons/Github.vue'
-import TelegramIcon from '@/components/icons/Telegram.vue'
+import OpenInNewIcon from '@/components/icons/OpenInNew.vue'
 
 import * as KernelSU from '@/helpers/KernelSU'
 import { exec } from 'kernelsu'
@@ -369,7 +369,17 @@ const openDisableTweaksView = () => router.push('/settings/disable_tweaks')
 const createShortcut = () => KernelSU.createShortcut()
 
 const openGithub = () => KernelSU.openWebsite('https://github.com/FluxProjectsDev/Flux')
-const openTelegram = () => KernelSU.openWebsite('https://t.me/c/3901105851/3')
+
+// Support is a public help destination, deliberately distinct from Donate — Donate lives in
+// Home.vue and is the only place OFFICIAL_DONATION_URL belongs. Routing the two to one address
+// would make the module either beg for money from a user asking for help or swallow bug reports
+// into a payment page.
+//
+// This previously pointed at https://t.me/c/3901105851/3, the same private-channel link Home.vue
+// carried before PR #2 corrected it there. A t.me/c/<internal-id>/ URL addresses a Telegram
+// channel by internal id, so it resolved only for accounts already in that channel and failed for
+// every other user — the Settings copy of the bug simply outlived the Home.vue fix.
+const openSupport = () => KernelSU.openWebsite('https://github.com/FluxProjectsDev/Flux/issues')
 
 const openExportModal = () => {
   exportStatus.value = 'loading'

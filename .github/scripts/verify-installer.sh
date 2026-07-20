@@ -85,8 +85,9 @@ build_package() {
 	sed -i 's|^updateJson=.*|updateJson=https://github.com/FluxProjectsDev/Flux/releases/latest/download/update.json|' "${stage}/module.prop"
 	sed -i 's|^support=.*|support=https://github.com/FluxProjectsDev/Flux/issues|' "${stage}/module.prop"
 
+	# No action.webp or webroot/icon.webp: module.prop declares neither shortcut icon, so a
+	# package carrying them would not be the package that ships.
 	cp module/assets/branding/banner.webp "${stage}/banner.webp"
-	cp module/assets/icons/action.webp "${stage}/action.webp"
 	cp module/assets/icons/donate.webp "${stage}/donate.webp"
 
 	# A stub daemon that answers the two subcommands the installer invokes. `check_gamelist`
@@ -113,7 +114,6 @@ STUB
 
 	mkdir -p "${stage}/webroot"
 	printf '<!doctype html><title>Flux</title>\n' >"${stage}/webroot/index.html"
-	cp module/assets/icons/action.webp "${stage}/webroot/icon.webp"
 
 	mkdir -p "${stage}/config"
 	printf '{"schema":2}\n' >"${stage}/config/device_mitigation.json"
@@ -489,8 +489,6 @@ name=Flux
 version=1.0.0 (999-testfix-release)
 versionCode=999
 banner=banner.webp
-webuiIcon=webroot/icon.webp
-actionIcon=action.webp
 donateIcon=donate.webp
 PROPEOF
 
@@ -502,7 +500,7 @@ PROPEOF
 
 	printf 'PK\003\004synthesiscore-stub' >"${r}/mod/synthesiscore.apk"
 	printf '<!doctype html><title>Flux</title>\n' >"${r}/mod/webroot/index.html"
-	for f in banner.webp action.webp donate.webp webroot/icon.webp; do
+	for f in banner.webp donate.webp; do
 		printf 'stub' >"${r}/mod/${f}"
 	done
 
