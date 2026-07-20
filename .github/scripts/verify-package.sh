@@ -461,6 +461,27 @@ if [ -f "${PROP:-/nonexistent}" ]; then
 	else
 		green "  support=${SUPPORT}"
 	fi
+
+	# Support and Donate are different promises: one is where a user goes when the module is
+	# broken, the other is where they go to give money. Collapsing them onto one address either
+	# asks for payment from someone reporting a bug or drops bug reports into a payment page.
+	if [ -n "${SUPPORT}" ] && [ -n "${DONATE_URL}" ] && [ "${SUPPORT}" = "${DONATE_URL}" ]; then
+		fail "support and donate are both '${SUPPORT}' — they must stay separate destinations"
+	fi
+fi
+
+# A t.me/c/<internal-id>/ URL addresses a Telegram channel by internal id: it resolves only for
+# accounts already in that channel and silently fails for everyone else. Shipping one as a
+# user-facing destination means the button is broken for essentially every user who taps it.
+# Both Home.vue and Settings.vue carried the same private link, and fixing only the first left
+# the second live, so this asserts against the built bundle rather than the Vue sources — minified
+# output has no comments, so a link that survives here is a link that actually ships.
+if grep -rqF 't.me/c/' "${WORK}/pkg" 2>/dev/null; then
+	fail "the package ships a private-channel t.me/c/ link:"
+	grep -rlF 't.me/c/' "${WORK}/pkg" 2>/dev/null | sed "s#^${WORK}/pkg/#    #" >&2
+	fail "  a private-channel link is unreachable for normal users and must not ship"
+else
+	green "  no private-channel t.me/c/ link in the package"
 fi
 
 # The editable asset sources are build inputs, not module content. module/assets/ is excluded
