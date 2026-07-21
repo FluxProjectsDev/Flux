@@ -27,6 +27,7 @@ on:
       - 'jni/**'
       - 'module/**'
       - 'scripts/**'
+      - 'webui/**'
       - 'prebuilt/**'
       - 'dependencies/**'
       - '.github/scripts/**'
@@ -133,6 +134,12 @@ jobs:
           bun run build
           cp -r ./dist/* ../module/webroot
 
+      # The produced build directory carries only presentation assets: no source maps, no
+      # development/test files, no remote code, nothing secret-shaped. Proven on webui/dist — the
+      # bytes just built — before they are packaged, and a deterministic asset inventory is emitted.
+      - name: Prove WebUI production build
+        run: bash .github/scripts/verify-webui-inventory.sh webui/dist
+
       - name: Compile Flashable Zip
         id: compileZip
         run: bash .github/scripts/compile_zip.sh
@@ -185,5 +192,6 @@ jobs:
             libs/*/fluxd
             package-inventory.tsv
             native-hardening-*.exports
+            webui-inventory.tsv
           retention-days: 7
           if-no-files-found: warn
