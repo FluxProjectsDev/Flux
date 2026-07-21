@@ -56,6 +56,10 @@
 #   config-dir files      gamelist.json, device_mitigation.json, the profile/state files: these are
 #                         mutable runtime state and user-editable settings, not shipped code. They
 #                         are validated at install; hashing live settings at boot is meaningless.
+#   customize.sh          runs only at install time and is not part of any runtime write path, so
+#                         tampering with it after install changes nothing until a re-install, which
+#                         re-verifies the whole package from the ZIP anyway. Excluded so the boot
+#                         check does not depend on a file the payload step never installs.
 #
 # POSIX sh only: no `local`, no arrays, no [[ ]], no process substitution. Helper variables are
 # `_ri_`-prefixed so they cannot collide with a sourcing script's variables.
@@ -74,7 +78,6 @@ service.sh
 action.sh
 cleanup.sh
 uninstall.sh
-customize.sh
 integrity_runtime.sh
 webroot/index.html
 EOF
