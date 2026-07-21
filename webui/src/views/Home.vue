@@ -12,6 +12,25 @@
     <!-- Scrollable Content -->
     <div class="scrollbar-hidden pb-safe-nav flex-1 min-h-0 overflow-y-scroll">
       <div class="max-w-3xl mx-auto p-5 py-1">
+        <!-- Runtime integrity failure. Shown only when the boot-time gate recorded a failure;
+             a healthy or not-yet-checked device renders nothing here. -->
+        <div
+          v-if="homeStore.integrityStateRaw === 'failed'"
+          class="bg-error-container mb-4 p-4 rounded-xl text-on-error-container"
+          role="alert"
+        >
+          <div class="flex items-start gap-3">
+            <ErrorIcon class="mt-1 shrink-0" />
+            <div class="flex-1">
+              <h3 class="text-sm font-semibold">{{ $t('home_page.integrity.title') }}</h3>
+              <p class="text-xs mt-1 leading-relaxed">{{ $t('home_page.integrity.description') }}</p>
+              <p v-if="homeStore.integrityReason" class="allow-copy text-xs mt-2 opacity-80">
+                {{ $t('home_page.integrity.reason', { reason: homeStore.integrityReason }) }}
+              </p>
+            </div>
+          </div>
+        </div>
+
         <!-- Daemon Status -->
         <div
           class="bg-secondary-container mb-4 p-4 rounded-xl flex items-center justify-between text-on-secondary-container"
@@ -136,6 +155,7 @@ import StarlyGear from '@/components/icons/StarlyGear.vue'
 import ConsoleIcon from '@/components/icons/Console.vue'
 import ChipsetIcon from '@/components/icons/Chipset.vue'
 import AndroidIcon from '@/components/icons/Android.vue'
+import ErrorIcon from '@/components/icons/Error.vue'
 
 const { t } = useI18n()
 const homeStore = useHomeStore()

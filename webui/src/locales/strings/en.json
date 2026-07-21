@@ -23,6 +23,11 @@
     "learn_flux": {
       "title": "Explore Flux",
       "description": "Deep-dive into profiles, tuning, and everything Flux Tweaks can do for your device."
+    },
+    "integrity": {
+      "title": "Integrity check failed",
+      "description": "Flux paused tuning because a critical file changed after installation. Open the module manager's Action button to run the Self-Test for details, and reinstall Flux from the official release if you did not make this change.",
+      "reason": "Reason: {reason}"
     }
   },
   "games_page": {

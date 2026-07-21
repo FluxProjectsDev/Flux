@@ -87,3 +87,11 @@ jobs:
 
       - name: actionlint
         uses: raven-actions/actionlint@v2
+
+      # The runtime integrity classifier (module/integrity_runtime.sh) decides, at each boot,
+      # whether Flux may write. This exercises it against a synthetic module tree — one case per
+      # distinguishable failure (mismatch, missing, symlink, wrongtype, writable, denied,
+      # generation, nomanifest) — proving it reports the right reason and returns the safe-no-write
+      # signal on any critical failure. Pure host shell; needs no NDK and no device.
+      - name: Runtime integrity classifier tests
+        run: bash .github/scripts/verify-runtime-integrity.sh

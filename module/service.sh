@@ -25,6 +25,38 @@ CLEANUP_SCRIPT="/data/adb/service.d/.flux_cleanup.sh"
 CPUFREQ="/sys/devices/system/cpu/cpu0/cpufreq"
 SYSMON_PKG="com.febricahyaa.synthesiscore"
 
+# ── Runtime integrity gate ───────────────────────────────────────────────────
+# Verify the critical runtime files against the baseline recorded at install
+# (module/integrity_runtime.sh) BEFORE anything else runs. It is placed first on purpose: a
+# failure here must reach a genuine no-write state, and the only way to guarantee that is to
+# decide before a single device node — governor, thermal, tuning, or the daemon — has been
+# touched. On failure this records a bounded reason for Self-Test and the WebUI, tells nothing
+# to write, and stops. It never deletes a file, never reboots, and never bootloops.
+mkdir -p "$MODULE_CONFIG" 2>/dev/null
+if [ -f "$MODDIR/integrity_runtime.sh" ]; then
+	# shellcheck disable=SC1091  # installed alongside this script; verified at install time
+	. "$MODDIR/integrity_runtime.sh"
+	_flux_gen=$(sed -n 's/^versionCode=//p' "$MODDIR/module.prop" 2>/dev/null | head -1)
+	flux_ri_verify "$MODULE_CONFIG/integrity.manifest" "$MODDIR" "$_flux_gen"
+	_flux_ri_rc=$?
+	echo "$FLUX_RI_STATE" >"$MODULE_CONFIG/integrity_state"
+	echo "$FLUX_RI_CLASS" >"$MODULE_CONFIG/integrity_class"
+	echo "$FLUX_RI_REASON" >"$MODULE_CONFIG/integrity_reason"
+	if [ "$_flux_ri_rc" -eq 1 ]; then
+		# Safe no-write. current_profile is left describing the safe default so the WebUI does not
+		# show a tuning that is not being applied.
+		echo "$(date): integrity FAILED ($FLUX_RI_CLASS): $FLUX_RI_REASON" >>"$MODULE_CONFIG/sysmon.log"
+		echo 3 >"$MODULE_CONFIG/current_profile" # BALANCE_PROFILE — the safe default
+		exit 0
+	fi
+	# rc 0 = ok, rc 2 = ungoverned (a pre-hardening install with no baseline). Both continue; the
+	# state file already records which, and Self-Test reports it.
+else
+	echo "unknown" >"$MODULE_CONFIG/integrity_state"
+	echo "nomodule" >"$MODULE_CONFIG/integrity_class"
+	echo "integrity module not installed" >"$MODULE_CONFIG/integrity_reason"
+fi
+
 # Restore original module.prop
 [ -f "$MODDIR/module.prop.orig" ] && {
   cp "$MODDIR/module.prop.orig" "$MODDIR/module.prop"
