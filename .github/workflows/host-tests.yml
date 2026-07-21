@@ -61,7 +61,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: ShellCheck the test runner
-        uses: ludeeus/action-shellcheck@master
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # v2.0.0
         with:
           scandir: './jni/tests'
 
@@ -70,7 +70,7 @@ jobs:
       # when it should fail. Scoped to .github/scripts — scripts/ carries pre-existing findings
       # in the device runtime scripts, which are a separate cleanup and not this phase's work.
       - name: ShellCheck the CI scripts
-        uses: ludeeus/action-shellcheck@master
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # v2.0.0
         with:
           scandir: './.github/scripts'
 
@@ -80,7 +80,7 @@ jobs:
       # Magisk installs run under busybox ash, where `local`, `==` and `$(<file)` are undefined.
       # `$(<file)` had in fact been silently expanding to nothing in the SoC detection chain.
       - name: ShellCheck the module scripts
-        uses: ludeeus/action-shellcheck@master
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # v2.0.0
         with:
           scandir: './module'
           severity: warning
@@ -95,3 +95,18 @@ jobs:
       # signal on any critical failure. Pure host shell; needs no NDK and no device.
       - name: Runtime integrity classifier tests
         run: bash .github/scripts/verify-runtime-integrity.sh
+
+      # Fail if a credential-shaped string or key material was committed to the source tree. The
+      # package-level scan in verify-release-readiness.sh covers the built artifact; this covers
+      # what is committed, before it is ever built in.
+      - name: Secret scan (committed tree)
+        run: bash .github/scripts/scan-secrets.sh
+
+      # Least-privilege token scopes, immutable third-party action refs, no secret reachable on a
+      # pull_request, explicitly named artifacts. Parses the workflows with a real YAML parser, so
+      # PyYAML must be present (installed from apt — the runner image is PEP 668 externally-managed,
+      # so a bare pip install would fail).
+      - name: Supply-chain audit (workflows)
+        run: |
+          python3 -c "import yaml" 2>/dev/null || sudo apt-get install -y python3-yaml
+          bash .github/scripts/verify-supply-chain.sh
