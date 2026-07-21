@@ -622,6 +622,45 @@ check_safety() {
 	fi
 }
 
+# ── 8. Runtime integrity ─────────────────────────────────────────────────────
+# The boot-time integrity gate (service.sh + integrity_runtime.sh) records its verdict under the
+# config dir. This surfaces it: a user who taps Self-Test after a failed boot sees exactly why
+# Flux entered the safe no-write state, in the place they already look. Read-only, like everything
+# else here — it reports the recorded verdict, it does not re-run verification (which would be a
+# second, possibly disagreeing, implementation of the check).
+check_integrity() {
+	_state_file="${FLUX_CONFIG_DIR}/integrity_state"
+	if [ ! -f "${_state_file}" ]; then
+		# No verdict recorded: the module has not booted since install, or this is an install from
+		# before runtime integrity existed. Not a failure on its own.
+		st_warn "Runtime integrity not yet checked (reboot pending?)"
+		return
+	fi
+	_state="$(head -1 "${_state_file}" 2>/dev/null)"
+	_class="$(head -1 "${FLUX_CONFIG_DIR}/integrity_class" 2>/dev/null)"
+	_reason="$(head -1 "${FLUX_CONFIG_DIR}/integrity_reason" 2>/dev/null)"
+	case "${_state}" in
+	ok)
+		st_pass "Runtime integrity verified"
+		;;
+	failed)
+		# The class is the actionable part: mismatch / missing / symlink / wrongtype / writable /
+		# denied / generation tells the user whether to reflash or to suspect tampering. The reason
+		# names one file and carries no digest, so it is safe to show in a screenshot.
+		st_fail "Runtime integrity FAILED (${_class:-unknown})"
+		[ -n "${_reason}" ] && st_note "${_reason}"
+		st_note "Flux is in a safe no-write state; no tuning is applied"
+		;;
+	ungoverned)
+		st_warn "Runtime integrity has no baseline (pre-hardening install)"
+		st_note "reinstall the current build to enable boot-time verification"
+		;;
+	*)
+		st_warn "Runtime integrity state unknown (${_state:-<empty>})"
+		;;
+	esac
+}
+
 # ── Run ──────────────────────────────────────────────────────────────────────
 echo "Flux Self-Test"
 echo "----------------------------"
@@ -634,6 +673,7 @@ check_health
 check_capability
 check_assets
 check_safety
+check_integrity
 
 # ── Telemetry diagnostic ─────────────────────────────────────────────────────
 # Deliberately narrow. This exists so a physical-device failure can be diagnosed from a

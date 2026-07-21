@@ -1,0 +1,29 @@
+# Export map (linker version script) for the fluxd executable.
+#
+# fluxd is a standalone daemon launched as `fluxd daemon`. The kernel enters it at the
+# ELF entry point (e_entry) — NOT through a dynamic symbol — so the executable needs to
+# export no global symbols at all:
+#
+#   - it is not a shared library and nothing dlopen()s it;
+#   - no JNI layer resolves symbols out of it (SynthesisCore is a separate APK run under
+#     app_process, in its own process, and communicates through the telemetry file, not
+#     through fluxd's symbol table);
+#   - there is no externally documented ABI that consumers link against.
+#
+# So the required entry points are the ELF entry point and fluxd's imports from libc /
+# libc++ — none of which is a *defined global* symbol of fluxd. Making every defined
+# global local therefore removes the whole project-internal export surface (every
+# `flux::…` symbol) from the dynamic symbol table without hiding anything fluxd needs to
+# start or run. `local: *` only demotes *defined* globals; undefined imports are
+# untouched, so the binary still links and executes.
+#
+# This is the authoritative export map referenced by LOCAL_LDFLAGS in jni/Android.mk.
+# .github/scripts/verify-native-hardening.sh proves, from the built binary, that its
+# dynamic table exports no `flux::` symbol — i.e. that this map took effect — while
+# verify-native-telemetry.sh continues to prove (from the unstripped link output, whose
+# .symtab and build-id this map does not touch) that every required V2 component is still
+# linked in. Hiding a dynamic *export* is not hiding a component from the *link*.
+{
+  local:
+    *;
+};

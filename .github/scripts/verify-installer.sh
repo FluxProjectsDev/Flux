@@ -73,7 +73,7 @@ build_package() {
 	cp -r module/installer "${stage}/installer"
 	rm -f "${stage}/installer"/*.sha256
 	cp module/customize.sh module/verify.sh module/service.sh module/uninstall.sh \
-		module/cleanup.sh module/action.sh module/module.prop "${stage}/"
+		module/cleanup.sh module/action.sh module/integrity_runtime.sh module/module.prop "${stage}/"
 	mkdir -p "${stage}/META-INF/com/google/android"
 	cp module/META-INF/com/google/android/update-binary \
 		module/META-INF/com/google/android/updater-script \
@@ -228,9 +228,11 @@ check_clean_install() {
 	grep -q "\[8/8\]" "${log}" || fail "${name}: stage 8 never ran"
 
 	for f in system/bin/fluxd system/bin/flux_utility service.sh uninstall.sh cleanup.sh \
-		action.sh synthesiscore.apk webroot/index.html module.prop module.prop.orig; do
+		action.sh integrity_runtime.sh synthesiscore.apk webroot/index.html module.prop module.prop.orig; do
 		[ -s "${cr}/modpath/${f}" ] || fail "${name}: installed tree is missing ${f}"
 	done
+	# The runtime integrity baseline must be recorded in the config dir at install.
+	[ -s "${cr}/config/integrity.manifest" ] || fail "${name}: integrity.manifest was not written"
 	[ -x "${cr}/modpath/system/bin/fluxd" ] || fail "${name}: installed fluxd is not executable"
 	[ -s "${cr}/config/gamelist.json" ] || fail "${name}: gamelist.json was not created"
 	[ -s "${cr}/config/soc_recognition" ] || fail "${name}: soc_recognition was not written"

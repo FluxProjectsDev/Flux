@@ -45,8 +45,15 @@ jobs:
     runs-on: ubuntu-latest
     # Publishing a release needs write access to repository contents. Scoped to this job so the
     # default stays least-privilege; only the release upload elevates.
+    #
+    # id-token / attestations write are for the build-provenance attestation of the ZIP. They are
+    # inert on pull_request and push: the attestation step (like the release step) is gated to
+    # workflow_dispatch, so nothing signs or publishes on a PR even though the scopes are present.
+    # Neither is a repository-content write; id-token mints a short-lived OIDC token for Sigstore.
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -76,11 +83,74 @@ jobs:
         id: compileZip
         run: bash .github/scripts/compile_zip.sh
 
+      # Checksum manifest (SHA256SUMS) and traceability metadata (build-metadata.json) for the
+      # exact ZIP just produced. Runs on every event — PR builds included — so the manifest is
+      # always generated and auditable; the digest is exported for the attestation to consume, so
+      # what is attested is the value computed here and not a re-derivation that could disagree.
+      - name: Generate checksum manifest and build metadata
+        id: metadata
+        env:
+          NDK_VERSION: r29
+        run: bash .github/scripts/gen_release_metadata.sh "${{ steps.compileZip.outputs.zipName }}"
+
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v6
         with:
           name: flux-build
-          path: ${{ steps.compileZip.outputs.zipName }}
+          path: |
+            ${{ steps.compileZip.outputs.zipName }}
+            SHA256SUMS
+            build-metadata.json
+
+      # Private debug-symbol bundle for crash symbolization. ndk-build strips the shipped
+      # binary (libs/<abi>/fluxd) but keeps the unstripped link output at
+      # obj/local/<abi>/fluxd, which carries the .symtab and the GNU build-id that matches
+      # the shipped binary. It is uploaded SEPARATELY from the flashable zip and is NEVER a
+      # release asset: it stays a short-retention CI artifact maintainers pull to resolve a
+      # crash address, so the symbols that were stripped off the release stay off the release
+      # while remaining recoverable. See docs/security/release-verification.md.
+      - name: Upload private debug symbols
+        uses: actions/upload-artifact@v6
+        with:
+          name: flux-debug-symbols-${{ github.run_id }}
+          path: obj/local/*/fluxd
+          retention-days: 14
+          if-no-files-found: error
+
+      # Build-provenance attestation of the ZIP. Dispatch-only — the same gate as the release —
+      # so nothing is attested on a pull_request or a push. attest-build-provenance computes the
+      # subject digest from subject-path itself and records a signed statement that this workflow
+      # run produced that exact file.
+      - name: Attest build provenance
+        id: attest
+        if: success() && github.event_name == 'workflow_dispatch'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.compileZip.outputs.zipName }}
+
+      # Prove the attestation targets the ZIP that ships. Reads the subject digest out of the
+      # signed bundle and asserts it equals the digest gen_release_metadata.sh computed for the
+      # ZIP. A green here means the thing attested and the thing published are provably one file.
+      - name: Prove attestation targets the ZIP
+        if: success() && github.event_name == 'workflow_dispatch'
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          ZIP_SHA: ${{ steps.metadata.outputs.zip_sha256 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BUNDLE:-}" ] || [ ! -f "${BUNDLE}" ]; then
+            echo "::error::attestation bundle not found"
+            exit 1
+          fi
+          SUBJECT_SHA="$(jq -r '.dsseEnvelope.payload' "${BUNDLE}" | base64 -d \
+            | jq -r '.subject[0].digest.sha256')"
+          echo "attested subject sha256: ${SUBJECT_SHA}"
+          echo "built ZIP     sha256:    ${ZIP_SHA}"
+          if [ "${SUBJECT_SHA}" != "${ZIP_SHA}" ]; then
+            echo "::error::attestation subject digest does not match the produced ZIP"
+            exit 1
+          fi
+          echo "Attestation subject digest equals the produced ZIP digest."
 
       - name: Publish GitHub Release
         # Only on manual dispatch: pull_request and push builds have no release tag and must
@@ -106,16 +176,22 @@ jobs:
           # It must describe this exact tag and zip, so it is built here rather than committed.
           bash .github/scripts/gen_update_json.sh "$TAG" "$ZIP" update.json
 
+          # update.json is generated here, after the earlier checksum step ran, so add its digest
+          # to the manifest now. SHA256SUMS then covers every published asset, and a user can run
+          # `sha256sum -c SHA256SUMS` against the whole release.
+          sha256sum update.json >>SHA256SUMS
+
           # Idempotent: create the release the first time, then re-upload (clobber) on re-runs
           # of the same tag rather than failing. changelog.md ships as an asset so the manifest
-          # can pin its changelog URL to this release instead of a moving branch.
+          # can pin its changelog URL to this release instead of a moving branch. SHA256SUMS and
+          # build-metadata.json ship so a downloader can verify integrity and provenance.
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG exists; uploading assets (clobber)."
-            gh release upload "$TAG" "$ZIP" update.json changelog.md --clobber
+            gh release upload "$TAG" "$ZIP" update.json changelog.md SHA256SUMS build-metadata.json --clobber
           else
             FLAGS=()
             if [ "$PRERELEASE" = "true" ]; then FLAGS+=(--prerelease); fi
-            gh release create "$TAG" "$ZIP" update.json changelog.md \
+            gh release create "$TAG" "$ZIP" update.json changelog.md SHA256SUMS build-metadata.json \
               --title "Flux ${TAG}" \
               --notes-file changelog.md \
               --target "$COMMIT" \

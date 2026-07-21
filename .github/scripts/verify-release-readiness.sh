@@ -71,7 +71,7 @@ classify_owner() {
 	system/bin/flux_utility) printf 'flux-utility (diagnostics)' ;;
 	synthesiscore.apk) printf 'SynthesisCore (telemetry provider)' ;;
 	webroot/*) printf 'WebUI' ;;
-	module.prop | customize.sh | service.sh | uninstall.sh | action.sh | cleanup.sh | verify.sh)
+	module.prop | customize.sh | service.sh | uninstall.sh | action.sh | cleanup.sh | verify.sh | integrity_runtime.sh)
 		printf 'module lifecycle'
 		;;
 	installer/*) printf 'installer (verified, sourced at install time)' ;;
@@ -93,7 +93,7 @@ classify_requirement() {
 	system/bin/flux_utility | synthesiscore.apk | webroot/index.html) printf 'required' ;;
 	# verify.sh is the installer trust root and every installer/ component is sourced as root at
 	# install time. None of them is optional: a missing one aborts the install by design.
-	verify.sh | action.sh | cleanup.sh) printf 'required' ;;
+	verify.sh | action.sh | cleanup.sh | integrity_runtime.sh) printf 'required' ;;
 	installer/*.sh) printf 'required' ;;
 	META-INF/com/google/android/update-binary) printf 'required (Magisk)' ;;
 	LICENSE | NOTICE.md) printf 'required (licensing)' ;;

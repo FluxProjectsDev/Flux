@@ -19,6 +19,14 @@ export const useHomeStore = defineStore('home', () => {
   const logoImage = ref('/flux_sleeping.avif')
   const isInitialized = ref(false)
 
+  // Runtime integrity verdict, written at boot by service.sh (see module/integrity_runtime.sh).
+  // '' until read, then one of: 'ok', 'failed', 'ungoverned', 'unknown'. This is a
+  // presentation-only read: the WebUI reports the verdict the trusted boot path recorded, it does
+  // not re-run verification (which would be a second, JS-side, defeatable implementation of it).
+  const integrityStateRaw = ref('')
+  const integrityClass = ref('')
+  const integrityReason = ref('')
+
   let profileInterval = null
   let daemonInterval = null
 
@@ -33,6 +41,7 @@ export const useHomeStore = defineStore('home', () => {
       getCurrentProfile(),
       getKernelVersion(),
       getChipset(),
+      getIntegrityState(),
     ])
 
     startProfileMonitoring()
@@ -198,6 +207,27 @@ export const useHomeStore = defineStore('home', () => {
     }
   }
 
+  // Read the boot-time integrity verdict. Read once at init: it only changes at boot, so polling
+  // it would be wasted work. A missing file means the check has not run yet (fresh install before
+  // first reboot), which is left as '' rather than treated as a failure.
+  async function getIntegrityState() {
+    try {
+      integrityStateRaw.value = (await KernelSU.readFile(`${configPath}/integrity_state`)).trim()
+      try {
+        integrityClass.value = (await KernelSU.readFile(`${configPath}/integrity_class`)).trim()
+        integrityReason.value = (await KernelSU.readFile(`${configPath}/integrity_reason`)).trim()
+      } catch {
+        integrityClass.value = ''
+        integrityReason.value = ''
+      }
+    } catch {
+      // No verdict recorded yet (not booted since install, or a pre-hardening install).
+      integrityStateRaw.value = ''
+      integrityClass.value = ''
+      integrityReason.value = ''
+    }
+  }
+
   async function getChipsetBrand() {
     try {
       const soc = await KernelSU.readFile(`${configPath}/soc_recognition`)
@@ -229,9 +259,13 @@ export const useHomeStore = defineStore('home', () => {
     daemonError,
     logoImage,
     isInitialized,
+    integrityStateRaw,
+    integrityClass,
+    integrityReason,
 
     // Actions
     initializeData,
+    getIntegrityState,
     stopProfileMonitoring,
     stopDaemonMonitoring,
     getServiceState,

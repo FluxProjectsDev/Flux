@@ -149,6 +149,38 @@ flux_verify_installed_tree() {
 	return 0
 }
 
+# Record the runtime integrity baseline: the verified generation service.sh re-checks at each boot.
+#
+# Runs after every packaged file was checksum-verified during extraction (installer/integrity.sh)
+# AND after flux_verify_installed_tree asserted the installed tree is complete, so the digests
+# captured here are known-good by construction. This is the runtime half of the same checksum
+# chain the installer already enforces, not a second scheme — see module/integrity_runtime.sh for
+# the format, the excluded files (module.prop is runtime-mutated) and the threat model.
+flux_write_runtime_manifest() {
+	# integrity_runtime.sh is a verified module payload (FLUX_PAYLOAD_CRITICAL), installed and
+	# checksum-verified by now. Sourcing it — rather than reimplementing the writer here — keeps
+	# the manifest format owned by the one file the boot path also uses, so they cannot drift.
+	if [ ! -f "${MODPATH}/integrity_runtime.sh" ]; then
+		flux_step_warn "Runtime integrity module absent; boot verification will be ungoverned"
+		return 0
+	fi
+	# shellcheck disable=SC1091  # verified payload, sourced by fixed name from the installed tree
+	. "${MODPATH}/integrity_runtime.sh"
+
+	_generation="$(sed -n 's/^versionCode=//p' "${MODPATH}/module.prop" | head -1)"
+	_manifest="${FLUX_CONFIG_DIR}/integrity.manifest"
+	if flux_ri_write_manifest "${_manifest}" "${_generation}" "${MODPATH}"; then
+		flux_verify_installed "${_manifest}" "runtime integrity manifest"
+		flux_step_ok "Runtime integrity baseline recorded (generation ${_generation})"
+	else
+		# Non-fatal. The module installs and runs; boot-time verification simply has no baseline,
+		# which service.sh reports as 'ungoverned' and tolerates — the same state a pre-hardening
+		# upgrade is in. It never claims a verification it could not actually record.
+		flux_step_warn "Could not record the runtime integrity baseline"
+	fi
+	return 0
+}
+
 # Installer scratch state must not survive into the installed module.
 flux_verify_clean_tree() {
 	_junk=""
@@ -193,5 +225,8 @@ flux_finalize() {
 	# capability is promoted by having identified a family.
 	echo "${FLUX_SOC}" >"${FLUX_CONFIG_DIR}/soc_recognition"
 	flux_verify_installed "${FLUX_CONFIG_DIR}/soc_recognition" "SoC family record"
+
+	# Last: record the verified generation for the boot-time integrity check.
+	flux_write_runtime_manifest
 	return 0
 }

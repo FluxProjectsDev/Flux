@@ -221,6 +221,9 @@ REQUIRED_ENTRIES=(
 	"verify.sh"
 	"action.sh"
 	"cleanup.sh"
+	# The runtime integrity verifier, sourced by service.sh at boot to gate all writes. It has to
+	# be in the package or the boot check silently becomes a no-op.
+	"integrity_runtime.sh"
 )
 for entry in "${REQUIRED_ENTRIES[@]}"; do
 	if grep -q "\(^\|/\)${entry##*/}$" "${MANIFEST}"; then

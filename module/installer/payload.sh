@@ -33,7 +33,7 @@
 # every one of them is load-bearing for something the module claims to do.
 
 # Files installed to MODPATH from the package root, each verified against its packaged digest.
-FLUX_PAYLOAD_CRITICAL="module.prop service.sh uninstall.sh action.sh cleanup.sh synthesiscore.apk"
+FLUX_PAYLOAD_CRITICAL="module.prop service.sh uninstall.sh action.sh cleanup.sh synthesiscore.apk integrity_runtime.sh"
 FLUX_PAYLOAD_OPTIONAL="banner.webp donate.webp"
 
 flux_install_module_files() {
